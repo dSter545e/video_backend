@@ -10,6 +10,29 @@ const normalizeServerConfig = (serverConfig) => ({
   publicBaseUrl: serverConfig.publicBaseUrl || "",
 });
 
+const formatR2Error = (error) => {
+  const name = error?.name || "";
+  const message = String(error?.message || "Unknown storage error");
+  const httpStatus = error?.$metadata?.httpStatusCode;
+
+  if (name === "NoSuchBucket" || httpStatus === 404) {
+    return "Bucket not found. Verify the bucket name and Cloudflare Account ID.";
+  }
+  if (name === "InvalidAccessKeyId") {
+    return "Invalid Access Key ID.";
+  }
+  if (name === "SignatureDoesNotMatch") {
+    return "Invalid Secret Access Key.";
+  }
+  if (httpStatus === 403 || name === "AccessDenied") {
+    return "Access denied. Check API token permissions and that the bucket belongs to this account.";
+  }
+  if (message.includes("UnknownError") || name === "Unknown") {
+    return "Could not connect to R2. Verify Account ID, access keys, bucket name, and that the bucket exists.";
+  }
+  return message;
+};
+
 const resolveDefaultStorageServer = async () => {
   const StorageServer = require("../models/StorageServer");
   const defaultServer = await StorageServer.findOne({ isDefault: true, isActive: true });
@@ -286,19 +309,27 @@ const configureAllR2Cors = async (allowedOrigins = getDefaultCorsOrigins()) => {
 
 const headBucketInR2 = async (serverConfig = null) => {
   const { HeadBucketCommand } = require("@aws-sdk/client-s3");
-  const client = await createR2Client(serverConfig);
-  const { bucket } = await getR2Config(serverConfig);
-  await client.send(new HeadBucketCommand({ Bucket: bucket }));
-  return { bucket };
+  try {
+    const client = await createR2Client(serverConfig);
+    const { bucket } = await getR2Config(serverConfig);
+    await client.send(new HeadBucketCommand({ Bucket: bucket }));
+    return { bucket };
+  } catch (error) {
+    throw new Error(formatR2Error(error));
+  }
 };
 
 const headObjectInR2 = async (objectKey, serverConfig = null) => {
   if (!objectKey) throw new Error("objectKey is required");
   const { HeadObjectCommand } = require("@aws-sdk/client-s3");
-  const client = await createR2Client(serverConfig);
-  const { bucket } = await getR2Config(serverConfig);
-  await client.send(new HeadObjectCommand({ Bucket: bucket, Key: objectKey }));
-  return { bucket, key: objectKey };
+  try {
+    const client = await createR2Client(serverConfig);
+    const { bucket } = await getR2Config(serverConfig);
+    await client.send(new HeadObjectCommand({ Bucket: bucket, Key: objectKey }));
+    return { bucket, key: objectKey };
+  } catch (error) {
+    throw new Error(formatR2Error(error));
+  }
 };
 
 module.exports = {
@@ -315,4 +346,5 @@ module.exports = {
   getDefaultStorageServer,
   headBucketInR2,
   headObjectInR2,
+  formatR2Error,
 };

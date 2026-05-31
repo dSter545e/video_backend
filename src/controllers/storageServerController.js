@@ -1,5 +1,6 @@
 const StorageServer = require("../models/StorageServer");
 const mongoose = require("mongoose");
+const { headBucketInR2, formatR2Error } = require("../utils/r2Client");
 
 const getStorageServers = async (req, res) => {
   const servers = await StorageServer.find().sort({ createdAt: -1 });
@@ -109,19 +110,30 @@ const testStorageServerConnection = async (req, res) => {
     return res.status(400).json({ error: "accountId, accessKeyId, secretAccessKey, and bucketName are required" });
   }
 
+  if (secretAccessKey === "********") {
+    return res.status(400).json({ error: "Enter the secret access key to test, or use Test on a saved server." });
+  }
+
   try {
-    const { S3Client, HeadBucketCommand } = require("@aws-sdk/client-s3");
-    const client = new S3Client({
-      region: "auto",
-      endpoint: `https://${accountId}.r2.cloudflarestorage.com`,
-      credentials: { accessKeyId, secretAccessKey },
-    });
-
-    await client.send(new HeadBucketCommand({ Bucket: bucketName }));
-
+    await headBucketInR2({ accountId, accessKeyId, secretAccessKey, bucketName });
     return res.json({ success: true, message: "Connection successful" });
   } catch (error) {
-    return res.status(400).json({ error: `Connection failed: ${error.message}` });
+    return res.status(400).json({ error: `Connection failed: ${error.message || formatR2Error(error)}` });
+  }
+};
+
+const testStoredStorageServerConnection = async (req, res) => {
+  const { id } = req.params;
+  if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ error: "Invalid id" });
+
+  const server = await StorageServer.findById(id);
+  if (!server) return res.status(404).json({ error: "Storage server not found" });
+
+  try {
+    await headBucketInR2(server.toObject());
+    return res.json({ success: true, message: "Connection successful" });
+  } catch (error) {
+    return res.status(400).json({ error: `Connection failed: ${error.message || formatR2Error(error)}` });
   }
 };
 
@@ -132,4 +144,5 @@ module.exports = {
   updateStorageServer,
   deleteStorageServer,
   testStorageServerConnection,
+  testStoredStorageServerConnection,
 };
