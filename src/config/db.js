@@ -9,6 +9,9 @@ const connectDB = async () => {
 
   await mongoose.connect(mongoUri);
   console.log("MongoDB connected");
+
+  const { backfillMissingVideoIds } = require("../utils/videoId");
+  await backfillMissingVideoIds();
 };
 
 module.exports = connectDB;

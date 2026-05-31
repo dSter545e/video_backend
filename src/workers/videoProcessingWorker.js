@@ -2,7 +2,6 @@ const fs = require("fs");
 const Video = require("../models/Video");
 const { processAndUploadVideoVariants } = require("../services/videoProcessingService");
 
-const videoDebugLog = () => {};
 const activeJobs = new Map();
 
 const startVideoProcessingJob = ({ videoId, localInputPath, originalName, title }) => {
@@ -10,42 +9,19 @@ const startVideoProcessingJob = ({ videoId, localInputPath, originalName, title 
   activeJobs.set(videoId, jobState);
 
   setImmediate(async () => {
-    const startedAt = Date.now();
-    let stage = "queued";
     const metrics = {
-      original: {
-        percent: 0,
-        uploadedMB: 0,
-        totalMB: 0,
-        speedMBps: 0,
-        etaSec: null,
-        waitingR2Ack: false,
-      },
       variants: {
         total: 0,
         completed: 0,
         current: null,
       },
     };
-    const heartbeat = setInterval(() => {
-      const elapsedSec = Math.floor((Date.now() - startedAt) / 1000);
-      videoDebugLog("Processing heartbeat", {
-        videoId,
-        stage,
-        elapsedSec,
-        cancelled: jobState.cancelled,
-        originalUpload: metrics.original,
-        variants: metrics.variants,
-      });
-    }, 10000);
+
     try {
-      videoDebugLog("Background processing started", { videoId, localInputPath });
       if (jobState.cancelled) {
         throw new Error("VIDEO_PROCESS_CANCELLED");
       }
 
-      stage = "processing_variants";
-      videoDebugLog("Starting variant generation", { videoId });
       const processed = await processAndUploadVideoVariants({
         localInputPath,
         originalName,
@@ -53,46 +29,15 @@ const startVideoProcessingJob = ({ videoId, localInputPath, originalName, title 
         shouldAbort: () => jobState.cancelled,
         onVariantPlan: (plan) => {
           metrics.variants.total = plan.total;
-          videoDebugLog("Variant plan ready", {
-            videoId,
-            totalVariants: plan.total,
-            heights: plan.heights,
-          });
         },
         onVariantStart: (variant) => {
           metrics.variants.current = variant.label;
-          videoDebugLog("Variant transcode started", {
-            videoId,
-            variant: variant.label,
-          });
         },
-        onVariantTranscoded: (variant) => {
-          videoDebugLog("Variant transcode complete", {
-            videoId,
-            variant: variant.label,
-            elapsedSec: variant.elapsedSec,
-            sizeMB: variant.sizeMB,
-          });
-        },
-        onVariantProgress: (progress) => {
-          videoDebugLog("Variant upload progress", {
-            videoId,
-            variant: progress.label,
-            percent: progress.percent,
-            uploadedMB: progress.uploadedMB,
-            totalMB: progress.totalMB,
-            speedMBps: progress.speedMBps,
-            etaSec: progress.etaSec,
-          });
-        },
+        onVariantTranscoded: () => {},
+        onVariantProgress: () => {},
         onVariantUploaded: (variant) => {
           metrics.variants.completed += 1;
           metrics.variants.current = variant.label;
-          videoDebugLog("Variant upload complete", {
-            videoId,
-            variant: variant.label,
-            uploadedCount: metrics.variants.completed,
-          });
         },
       });
 
@@ -113,31 +58,18 @@ const startVideoProcessingJob = ({ videoId, localInputPath, originalName, title 
           processingStatus: nextStatus,
         },
       });
-
-      stage = "completed";
-      videoDebugLog("Background processing finished", {
-        videoId,
-        variantCount: processed.variants?.length || 0,
-        maxSourceHeight: processed.maxSourceHeight,
-        finalStatus: nextStatus,
-      });
     } catch (error) {
-      stage = "failed";
-      if (error.message === "VIDEO_PROCESS_CANCELLED") {
-        videoDebugLog("Background processing cancelled", { videoId });
+      if (error.message !== "VIDEO_PROCESS_CANCELLED") {
+        await Video.findByIdAndUpdate(videoId, {
+          $set: {
+            processingStatus: "private",
+          },
+        });
       }
-      await Video.findByIdAndUpdate(videoId, {
-        $set: {
-          processingStatus: "private",
-        },
-      });
-      videoDebugLog("Background processing failed", { videoId, error: error.message, stack: error.stack });
     } finally {
-      clearInterval(heartbeat);
       activeJobs.delete(videoId);
       if (localInputPath) {
         fs.rmSync(localInputPath, { force: true });
-        videoDebugLog("Removed temp source video file", { videoId, localInputPath });
       }
     }
   });
@@ -147,7 +79,6 @@ const cancelVideoProcessingJob = (videoId) => {
   const job = activeJobs.get(videoId);
   if (job) {
     job.cancelled = true;
-    videoDebugLog("Cancellation requested for processing job", { videoId });
   }
 };
 

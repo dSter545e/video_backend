@@ -3,6 +3,13 @@ const mongoose = require("mongoose");
 const videoSchema = new mongoose.Schema(
   {
     title: { type: String, required: true, trim: true },
+    videoId: {
+      type: String,
+      unique: true,
+      sparse: true,
+      trim: true,
+      match: /^\d{6}$/,
+    },
     slug: { type: String, unique: true, sparse: true, trim: true, lowercase: true },
     description: { type: String, default: "" },
     thumbnail: { type: String, default: "" },
@@ -46,5 +53,16 @@ const videoSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+videoSchema.pre("save", async function assignVideoId(next) {
+  if (this.videoId) return next();
+  try {
+    const { generateUniqueVideoId } = require("../utils/videoId");
+    this.videoId = await generateUniqueVideoId();
+    next();
+  } catch (error) {
+    next(error);
+  }
+});
 
 module.exports = mongoose.model("Video", videoSchema);

@@ -17,10 +17,19 @@ const normalizeFinalStatus = (status) => {
   if (status === "inactive") return "private";
   return status;
 };
-const videoDebugLog = () => {};
 const isValidObjectId = (value) => mongoose.Types.ObjectId.isValid(value);
 
-const resolveVideoFilter = (identifier) => (isValidObjectId(identifier) ? { $or: [{ _id: identifier }, { slug: identifier }] } : { slug: identifier });
+const resolveVideoFilter = (identifier) => {
+  const trimmed = String(identifier || "").trim();
+  if (!trimmed) return { slug: "" };
+  if (isValidObjectId(trimmed)) {
+    return { $or: [{ _id: trimmed }, { slug: trimmed }, { videoId: trimmed }] };
+  }
+  if (/^\d{6}$/.test(trimmed)) {
+    return { $or: [{ videoId: trimmed }, { slug: trimmed }] };
+  }
+  return { $or: [{ slug: trimmed }, { videoId: trimmed }] };
+};
 const resolveCategoryFilter = (identifier) =>
   isValidObjectId(identifier) ? { $or: [{ _id: identifier }, { slug: identifier }] } : { slug: identifier };
 
@@ -314,19 +323,64 @@ const parsePositiveInt = (value, fallback) => {
   return parsed;
 };
 
+const escapeRegex = (value = "") => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const looksLikeVideoIdRegex = (value) => /[\^$.*+?()[\]{}|\\]/.test(value);
+
+const buildAutoVideoSearchFilter = async (query) => {
+  const trimmed = typeof query === "string" ? query.trim() : "";
+  if (!trimmed) return null;
+
+  if (/^\d{6}$/.test(trimmed)) {
+    return { videoId: trimmed };
+  }
+
+  if (looksLikeVideoIdRegex(trimmed) && /\d/.test(trimmed)) {
+    try {
+      return { videoId: new RegExp(trimmed, "i") };
+    } catch (_error) {
+      // fall through to broad text search
+    }
+  }
+
+  const textRegex = new RegExp(escapeRegex(trimmed), "i");
+  const orConditions = [
+    { title: textRegex },
+    { description: textRegex },
+    { videoId: textRegex },
+  ];
+
+  const categories = await Category.find({ name: textRegex }).select("_id");
+  if (categories.length) {
+    orConditions.push({ category: { $in: categories.map((item) => item._id) } });
+  }
+
+  return { $or: orConditions };
+};
+
+const applyVideoSearchToQuery = async (baseQuery, reqQuery) => {
+  const q = typeof reqQuery.q === "string" ? reqQuery.q.trim() : "";
+  if (!q) return baseQuery;
+
+  const searchFilter = await buildAutoVideoSearchFilter(q);
+  if (!searchFilter) return baseQuery;
+
+  return { ...baseQuery, ...searchFilter };
+};
+
 const getVideos = async (req, res) => {
   const { categoryId, sort, paginate } = req.query;
-  const query = { processingStatus: { $in: ["public", "active", "ready"] } };
+  let query = { processingStatus: { $in: ["public", "active", "ready"] } };
   if (categoryId) {
     const category = await Category.findOne(resolveCategoryFilter(categoryId)).select("_id");
     if (!category) return res.json([]);
     query.category = category._id;
   }
+  query = await applyVideoSearchToQuery(query, req.query);
   const sortQuery = resolveVideoSort(sort);
   const shouldPaginate = ["1", "true", "yes", "on"].includes(String(paginate || "").toLowerCase());
   const page = parsePositiveInt(req.query.page, 1);
   const limit = Math.min(parsePositiveInt(req.query.limit, 20), 50);
-  videoDebugLog("Fetching videos", { categoryId: categoryId || null });
 
   const baseQuery = Video.find(query).populate("category", "name imageUrl").populate("tags", "name displayName").sort(sortQuery);
   const videos = shouldPaginate ? await baseQuery.skip((page - 1) * limit).limit(limit) : await baseQuery;
@@ -352,16 +406,16 @@ const getVideos = async (req, res) => {
 
 const getVideosAdmin = async (req, res) => {
   const { sort, paginate } = req.query;
+  let query = await applyVideoSearchToQuery({}, req.query);
   const sortQuery = resolveVideoSort(sort);
   const shouldPaginate = ["1", "true", "yes", "on"].includes(String(paginate || "").toLowerCase());
   const page = parsePositiveInt(req.query.page, 1);
   const limit = Math.min(parsePositiveInt(req.query.limit, 20), 100);
-  videoDebugLog("Fetching all videos for admin");
-  const baseQuery = Video.find().populate("category", "name imageUrl").populate("tags", "name displayName").sort(sortQuery);
+  const baseQuery = Video.find(query).populate("category", "name imageUrl").populate("tags", "name displayName").sort(sortQuery);
   const videos = shouldPaginate ? await baseQuery.skip((page - 1) * limit).limit(limit) : await baseQuery;
   const enhanced = await attachEngagementDataToList(videos);
   if (shouldPaginate) {
-    const totalItems = await Video.countDocuments({});
+    const totalItems = await Video.countDocuments(query);
     const totalPages = Math.max(1, Math.ceil(totalItems / limit));
     return res.json({
       items: enhanced,
@@ -380,13 +434,6 @@ const getVideosAdmin = async (req, res) => {
 
 const createVideo = async (req, res) => {
   const { title, description, thumbnail, videoUrl, categoryId, status, slug, tags = [] } = req.body;
-  videoDebugLog("Create direct video request", {
-    title,
-    hasDescription: Boolean(description),
-    hasThumbnail: Boolean(thumbnail),
-    hasVideoUrl: Boolean(videoUrl),
-    categoryId,
-  });
 
   if (!title || !videoUrl || !categoryId) {
     return res.status(400).json({ error: "title, videoUrl and categoryId are required" });
@@ -394,7 +441,6 @@ const createVideo = async (req, res) => {
 
   const category = await Category.findOne(resolveCategoryFilter(categoryId)).select("_id");
   if (!category) {
-    videoDebugLog("Create direct video failed: category not found", { categoryId });
     return res.status(404).json({ error: "Category not found" });
   }
 
@@ -419,7 +465,6 @@ const createVideo = async (req, res) => {
   await video.populate("category", "name imageUrl");
   await video.populate("tags", "name displayName");
   const populated = video;
-  videoDebugLog("Create direct video success", { videoId: video._id.toString() });
   return res.status(201).json(populated);
 };
 
@@ -427,23 +472,13 @@ const createProcessedVideo = async (req, res) => {
   const { title, description, thumbnail, categoryId, status, slug, tags = [] } = req.body;
   const uploadedVideoFile = req.files?.video?.[0];
   const uploadedThumbnailFile = req.files?.thumbnailImage?.[0];
-  videoDebugLog("Create processed video request", {
-    title,
-    categoryId,
-    hasDescription: Boolean(description),
-    hasThumbnailUrl: Boolean(thumbnail),
-    hasVideoFile: Boolean(uploadedVideoFile),
-    hasThumbnailFile: Boolean(uploadedThumbnailFile),
-  });
 
   if (!title || !categoryId || !uploadedVideoFile) {
-    videoDebugLog("Create processed video failed: missing required fields");
     return res.status(400).json({ error: "title, categoryId and video file are required" });
   }
 
   const category = await Category.findOne(resolveCategoryFilter(categoryId)).select("_id");
   if (!category) {
-    videoDebugLog("Create processed video failed: category not found", { categoryId });
     return res.status(404).json({ error: "Category not found" });
   }
 
@@ -451,10 +486,6 @@ const createProcessedVideo = async (req, res) => {
   let uploadedThumbKey = "";
   let workerStarted = false;
   try {
-    videoDebugLog("Starting thumbnail upload (if provided)", {
-      hasThumbnailFile: Boolean(uploadedThumbnailFile),
-      thumbnailTempPath: uploadedThumbnailFile?.path || null,
-    });
     const uploadedThumb = await uploadThumbnailIfPresent(uploadedThumbnailFile);
     uploadedThumbKey = uploadedThumb?.key || "";
 
@@ -493,11 +524,6 @@ const createProcessedVideo = async (req, res) => {
     });
     workerStarted = true;
 
-    videoDebugLog("Create processed video accepted", {
-      videoId: video._id.toString(),
-      processingStatus: "processing",
-      videoTempPath: uploadedVideoFile.path,
-    });
     return res.status(200).json(populated);
   } catch (error) {
     if (uploadedThumbKey) {
@@ -509,26 +535,21 @@ const createProcessedVideo = async (req, res) => {
     }
     if (!workerStarted && uploadedVideoFile?.path) {
       fs.rmSync(uploadedVideoFile.path, { force: true });
-      videoDebugLog("Removed temp video file after pre-worker failure", { tempPath: uploadedVideoFile.path });
     }
-    videoDebugLog("Create processed video failed", { error: error.message });
     return res.status(500).json({ error: `Video processing failed: ${error.message}` });
   } finally {
     if (uploadedThumbnailFile?.path) {
       fs.rmSync(uploadedThumbnailFile.path, { force: true });
-      videoDebugLog("Removed temp thumbnail file", { tempPath: uploadedThumbnailFile.path });
     }
   }
 };
 
 const getVideoById = async (req, res) => {
   const { id } = req.params;
-  videoDebugLog("Get video by id request", { id });
 
   const userIdentifier = typeof req.query.userIdentifier === "string" ? req.query.userIdentifier.trim() : "";
   const video = await Video.findOne(resolveVideoFilter(id)).populate("category", "name imageUrl").populate("tags", "name displayName");
   if (!video) {
-    videoDebugLog("Get video by id failed: not found", { id });
     return res.status(404).json({ error: "Video not found" });
   }
   const enhanced = await attachEngagementData(video, userIdentifier);
@@ -545,7 +566,6 @@ const getVideoById = async (req, res) => {
       .limit(12);
   }
   enhanced.recommendedVideos = withMediaProxyUrlsList(recommendedVideos, req);
-  videoDebugLog("Get video by id success", { id });
   return res.json(withMediaProxyUrls(enhanced, req));
 };
 
@@ -553,21 +573,10 @@ const updateVideo = async (req, res) => {
   const { id } = req.params;
   const { title, description, thumbnail, videoUrl, categoryId, status, slug, tags } = req.body;
   const uploadedThumbnailFile = req.files?.thumbnailImage?.[0];
-  videoDebugLog("Update video request", {
-    id,
-    hasTitle: title !== undefined,
-    hasDescription: description !== undefined,
-    hasThumbnailUrl: thumbnail !== undefined,
-    hasVideoUrl: videoUrl !== undefined,
-    categoryId,
-    status,
-    hasThumbnailFile: Boolean(uploadedThumbnailFile),
-  });
 
   if (categoryId) {
     const category = await Category.findOne(resolveCategoryFilter(categoryId)).select("_id");
     if (!category) {
-      videoDebugLog("Update video failed: category not found", { categoryId });
       return res.status(404).json({ error: "Category not found" });
     }
   }
@@ -575,7 +584,6 @@ const updateVideo = async (req, res) => {
   try {
     const existing = await Video.findOne(resolveVideoFilter(id));
     if (!existing) {
-      videoDebugLog("Update video failed: video not found", { id });
       return res.status(404).json({ error: "Video not found" });
     }
     const resolvedCategory = categoryId ? await Category.findOne(resolveCategoryFilter(categoryId)).select("_id") : null;
@@ -595,7 +603,6 @@ const updateVideo = async (req, res) => {
       try {
         await deleteFileFromR2(existingThumbnailKey);
       } catch (error) {
-        videoDebugLog("Failed deleting old thumbnail from R2", { id, error: error.message });
       }
     }
 
@@ -622,10 +629,8 @@ const updateVideo = async (req, res) => {
       .populate("tags", "name displayName");
 
     if (!updated) {
-      videoDebugLog("Update video failed: video not found", { id });
       return res.status(404).json({ error: "Video not found" });
     }
-    videoDebugLog("Update video success", { id });
     return res.json(updated);
   } finally {
     if (uploadedThumbnailFile?.path) {
@@ -636,10 +641,8 @@ const updateVideo = async (req, res) => {
 
 const deleteVideo = async (req, res) => {
   const { id } = req.params;
-  videoDebugLog("Delete video request", { id });
   const existing = await Video.findOne(resolveVideoFilter(id));
   if (!existing) {
-    videoDebugLog("Delete video failed: not found", { id });
     return res.status(404).json({ error: "Video not found" });
   }
   if (existing.processingStatus === "processing") {
@@ -648,7 +651,6 @@ const deleteVideo = async (req, res) => {
 
   const deleted = await Video.findByIdAndDelete(existing._id);
   if (!deleted) {
-    videoDebugLog("Delete video failed: concurrent delete", { id });
     return res.status(404).json({ error: "Video not found" });
   }
   const keysToDelete = [];
@@ -680,11 +682,8 @@ const deleteVideo = async (req, res) => {
     try {
       await deleteFileFromR2(key);
     } catch (error) {
-      videoDebugLog("Failed deleting video media from R2", { id, key, error: error.message });
     }
   }
-
-  videoDebugLog("Delete video success", { id });
   return res.status(204).send();
 };
 

@@ -5,7 +5,6 @@ const Video = require("../models/Video");
 const { uploadFileToR2, deleteFileFromR2, extractObjectKeyFromUrl } = require("../utils/r2Client");
 const { buildUniqueSlug } = require("../utils/slug");
 
-const categoryDebugLog = () => {};
 const FEATURED_CATEGORY_LIMIT = 6;
 
 const parseFeaturedFlag = (featuredValue) => {
@@ -20,7 +19,6 @@ const parseFeaturedFlag = (featuredValue) => {
 
 const uploadCategoryImageIfPresent = async (file) => {
   if (!file) return null;
-  categoryDebugLog("Uploading category image to R2", { originalName: file.originalname, mimeType: file.mimetype });
   const objectKey = `images/categories/${Date.now()}-${file.filename}`;
   const uploaded = await uploadFileToR2({
     localFilePath: file.path,
@@ -31,9 +29,7 @@ const uploadCategoryImageIfPresent = async (file) => {
 };
 
 const getCategories = async (_req, res) => {
-  categoryDebugLog("Fetching all categories");
   const categories = await Category.find().sort({ createdAt: -1 });
-  categoryDebugLog("Categories fetched", { count: categories.length });
   return res.json(categories);
 };
 
@@ -41,13 +37,7 @@ const createCategory = async (req, res) => {
   const { name, imageUrl, slug } = req.body;
   const featured = parseFeaturedFlag(req.body.featured);
   const imageFile = req.file;
-  categoryDebugLog("Create category request", {
-    name,
-    hasImageUrl: Boolean(imageUrl),
-    hasImageFile: Boolean(imageFile),
-  });
   if (!name) {
-    categoryDebugLog("Create category failed: name is missing");
     return res.status(400).json({ error: "name is required" });
   }
 
@@ -72,10 +62,8 @@ const createCategory = async (req, res) => {
       imageKey: uploadedImage?.key || "",
       featured: Boolean(featured),
     });
-    categoryDebugLog("Create category success", { categoryId: category._id.toString() });
     return res.status(201).json(category);
   } catch (error) {
-    categoryDebugLog("Create category failed", { error: error.message });
     return res.status(400).json({ error: "Category already exists or invalid data" });
   } finally {
     if (imageFile?.path) {
@@ -89,22 +77,14 @@ const updateCategory = async (req, res) => {
   const { name, imageUrl, slug } = req.body;
   const featured = parseFeaturedFlag(req.body.featured);
   const imageFile = req.file;
-  categoryDebugLog("Update category request", {
-    id,
-    hasName: Boolean(name),
-    hasImageUrl: imageUrl !== undefined,
-    hasImageFile: Boolean(imageFile),
-  });
 
   if (!mongoose.Types.ObjectId.isValid(id)) {
-    categoryDebugLog("Update category failed: invalid id", { id });
     return res.status(400).json({ error: "Invalid category id" });
   }
 
   try {
     const existing = await Category.findById(id);
     if (!existing) {
-      categoryDebugLog("Update category failed: category not found", { id });
       return res.status(404).json({ error: "Category not found" });
     }
 
@@ -122,7 +102,6 @@ const updateCategory = async (req, res) => {
       try {
         await deleteFileFromR2(existingImageKey);
       } catch (error) {
-        categoryDebugLog("Failed deleting old category image from R2", { id, error: error.message });
       }
     }
 
@@ -153,11 +132,8 @@ const updateCategory = async (req, res) => {
     );
 
     if (!category) {
-      categoryDebugLog("Update category failed: category not found", { id });
       return res.status(404).json({ error: "Category not found" });
     }
-
-    categoryDebugLog("Update category success", { id });
     return res.json(category);
   } finally {
     if (imageFile?.path) {
@@ -168,22 +144,18 @@ const updateCategory = async (req, res) => {
 
 const deleteCategory = async (req, res) => {
   const { id } = req.params;
-  categoryDebugLog("Delete category request", { id });
 
   if (!mongoose.Types.ObjectId.isValid(id)) {
-    categoryDebugLog("Delete category failed: invalid id", { id });
     return res.status(400).json({ error: "Invalid category id" });
   }
 
   const usedInVideo = await Video.exists({ category: id });
   if (usedInVideo) {
-    categoryDebugLog("Delete category blocked: linked videos found", { id });
     return res.status(400).json({ error: "Cannot delete category linked with videos" });
   }
 
   const deleted = await Category.findByIdAndDelete(id);
   if (!deleted) {
-    categoryDebugLog("Delete category failed: category not found", { id });
     return res.status(404).json({ error: "Category not found" });
   }
 
@@ -192,11 +164,8 @@ const deleteCategory = async (req, res) => {
     try {
       await deleteFileFromR2(deletedImageKey);
     } catch (error) {
-      categoryDebugLog("Failed deleting category image from R2", { id, error: error.message });
     }
   }
-
-  categoryDebugLog("Delete category success", { id });
   return res.status(204).send();
 };
 

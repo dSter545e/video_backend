@@ -232,16 +232,9 @@ const extractObjectKeyFromUrl = (fileUrl) => {
   }
 };
 
-const getDefaultCorsOrigins = () => {
-  const fromEnv = process.env.R2_CORS_ORIGINS;
-  if (fromEnv) {
-    return fromEnv
-      .split(",")
-      .map((origin) => origin.trim())
-      .filter(Boolean);
-  }
-  return ["http://localhost:3000", "http://localhost:3001", "http://127.0.0.1:3000", "http://127.0.0.1:3001"];
-};
+const { parseOriginsFromEnv } = require("../config/cors");
+
+const getDefaultCorsOrigins = () => parseOriginsFromEnv();
 
 const configureR2Cors = async (allowedOrigins = getDefaultCorsOrigins()) => {
   const client = createR2Client();

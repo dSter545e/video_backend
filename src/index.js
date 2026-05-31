@@ -2,7 +2,7 @@ const dotenv = require("dotenv");
 dotenv.config();
 
 const express = require("express");
-const cors = require("cors");
+const { createCorsMiddleware } = require("./config/cors");
 const connectDB = require("./config/db");
 const authRoutes = require("./routes/authRoutes");
 const userAuthRoutes = require("./routes/userAuthRoutes");
@@ -20,7 +20,7 @@ const { startAutoBackupScheduler } = require("./services/backupService");
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-app.use(cors());
+app.use(createCorsMiddleware());
 app.use(express.json());
 
 app.get("/", (_req, res) => {
