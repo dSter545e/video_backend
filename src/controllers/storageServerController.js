@@ -2,6 +2,17 @@ const StorageServer = require("../models/StorageServer");
 const mongoose = require("mongoose");
 const { headBucketInR2, formatR2Error } = require("../utils/r2Client");
 
+const trimCredentials = (body = {}) => ({
+  name: typeof body.name === "string" ? body.name.trim() : body.name,
+  accountId: typeof body.accountId === "string" ? body.accountId.trim() : body.accountId,
+  accessKeyId: typeof body.accessKeyId === "string" ? body.accessKeyId.trim() : body.accessKeyId,
+  secretAccessKey: typeof body.secretAccessKey === "string" ? body.secretAccessKey.trim() : body.secretAccessKey,
+  bucketName: typeof body.bucketName === "string" ? body.bucketName.trim() : body.bucketName,
+  publicBaseUrl: typeof body.publicBaseUrl === "string" ? body.publicBaseUrl.trim().replace(/\/+$/, "") : body.publicBaseUrl,
+  isDefault: body.isDefault,
+  isActive: body.isActive,
+});
+
 const getStorageServers = async (req, res) => {
   const servers = await StorageServer.find().sort({ createdAt: -1 });
   // Omit secret access key from response for security
@@ -24,7 +35,8 @@ const getActiveStorageServers = async (req, res) => {
 };
 
 const createStorageServer = async (req, res) => {
-  const { name, accountId, accessKeyId, secretAccessKey, bucketName, publicBaseUrl, isDefault, isActive } = req.body;
+  const { name, accountId, accessKeyId, secretAccessKey, bucketName, publicBaseUrl, isDefault, isActive } =
+    trimCredentials(req.body);
 
   if (!name || !accountId || !accessKeyId || !secretAccessKey || !bucketName) {
     return res.status(400).json({ error: "Required fields are missing" });
@@ -52,7 +64,8 @@ const updateStorageServer = async (req, res) => {
   const { id } = req.params;
   if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ error: "Invalid id" });
 
-  const { name, accountId, accessKeyId, secretAccessKey, bucketName, publicBaseUrl, isDefault, isActive } = req.body;
+  const { name, accountId, accessKeyId, secretAccessKey, bucketName, publicBaseUrl, isDefault, isActive } =
+    trimCredentials(req.body);
 
   const updateData = {
     ...(name !== undefined && { name }),
@@ -104,7 +117,7 @@ const deleteStorageServer = async (req, res) => {
 };
 
 const testStorageServerConnection = async (req, res) => {
-  const { accountId, accessKeyId, secretAccessKey, bucketName } = req.body;
+  const { accountId, accessKeyId, secretAccessKey, bucketName } = trimCredentials(req.body);
 
   if (!accountId || !accessKeyId || !secretAccessKey || !bucketName) {
     return res.status(400).json({ error: "accountId, accessKeyId, secretAccessKey, and bucketName are required" });

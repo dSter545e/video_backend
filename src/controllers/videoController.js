@@ -31,6 +31,10 @@ const resolveVideoFilter = (identifier) => {
   }
   return { $or: [{ slug: trimmed }, { videoId: trimmed }] };
 };
+
+const resolveCategoryFilter = (identifier) =>
+  isValidObjectId(identifier) ? { $or: [{ _id: identifier }, { slug: identifier }] } : { slug: identifier };
+
 const resolveStorageServerConfig = async (storageServerId) => {
   if (!storageServerId) return null;
   const server = await StorageServer.findById(storageServerId);

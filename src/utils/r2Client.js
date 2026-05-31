@@ -25,7 +25,11 @@ const formatR2Error = (error) => {
     return "Invalid Secret Access Key.";
   }
   if (httpStatus === 403 || name === "AccessDenied") {
-    return "Access denied. Check API token permissions and that the bucket belongs to this account.";
+    return (
+      "Access denied. In Cloudflare Dashboard → R2 → Manage R2 API Tokens, create a token with " +
+      "\"Object Read & Write\" (or Admin Read & Write) scoped to this bucket. " +
+      "Verify Account ID, Access Key ID, Secret Key, and bucket name match the dashboard exactly."
+    );
   }
   if (message.includes("UnknownError") || name === "Unknown") {
     return "Could not connect to R2. Verify Account ID, access keys, bucket name, and that the bucket exists.";
@@ -308,11 +312,12 @@ const configureAllR2Cors = async (allowedOrigins = getDefaultCorsOrigins()) => {
 };
 
 const headBucketInR2 = async (serverConfig = null) => {
-  const { HeadBucketCommand } = require("@aws-sdk/client-s3");
+  const { ListObjectsV2Command } = require("@aws-sdk/client-s3");
   try {
     const client = await createR2Client(serverConfig);
     const { bucket } = await getR2Config(serverConfig);
-    await client.send(new HeadBucketCommand({ Bucket: bucket }));
+    // ListObjects works with Object Read & Write tokens; HeadBucket often requires Admin on R2.
+    await client.send(new ListObjectsV2Command({ Bucket: bucket, MaxKeys: 1 }));
     return { bucket };
   } catch (error) {
     throw new Error(formatR2Error(error));
