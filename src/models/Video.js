@@ -50,19 +50,22 @@ const videoSchema = new mongoose.Schema(
       },
     ],
     category: { type: mongoose.Schema.Types.ObjectId, ref: "Category", required: true },
+    storageServer: { type: mongoose.Schema.Types.ObjectId, ref: "StorageServer" },
+    healthStatus: {
+      type: String,
+      enum: ["online", "offline", "processing", "unknown"],
+      default: "unknown",
+    },
+    healthCheckedAt: { type: Date, default: null },
+    healthMessage: { type: String, default: "" },
   },
   { timestamps: true }
 );
 
-videoSchema.pre("save", async function assignVideoId(next) {
-  if (this.videoId) return next();
-  try {
-    const { generateUniqueVideoId } = require("../utils/videoId");
-    this.videoId = await generateUniqueVideoId();
-    next();
-  } catch (error) {
-    next(error);
-  }
+videoSchema.pre("save", async function assignVideoId() {
+  if (this.videoId) return;
+  const { generateUniqueVideoId } = require("../utils/videoId");
+  this.videoId = await generateUniqueVideoId();
 });
 
 module.exports = mongoose.model("Video", videoSchema);

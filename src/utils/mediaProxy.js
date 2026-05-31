@@ -23,15 +23,6 @@ const isR2MediaUrl = (url) => {
   if (!url || typeof url !== "string") return false;
   try {
     const hostname = new URL(url).hostname;
-    const publicBase = process.env.R2_PUBLIC_BASE_URL || "";
-    if (publicBase) {
-      try {
-        const configuredHost = new URL(publicBase).hostname;
-        if (hostname === configuredHost) return true;
-      } catch (_error) {
-        // Ignore invalid configured base URL.
-      }
-    }
     return hostname.endsWith(".r2.dev") || hostname.includes("r2.cloudflarestorage.com");
   } catch (_error) {
     return false;

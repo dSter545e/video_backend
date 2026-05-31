@@ -1,20 +1,19 @@
 const {
-  createDatabaseBackup,
+  runBackupJob,
   listDatabaseBackups,
-  pruneOldBackups,
+  getBackupStatus,
   restoreDatabaseBackup,
 } = require("../services/backupService");
 
 const createBackup = async (req, res) => {
   const initiatedBy = req.admin?.email || "admin";
-  const result = await createDatabaseBackup({ initiatedBy });
-  await pruneOldBackups({ retentionDays: 30 });
+  const result = await runBackupJob({ initiatedBy });
   return res.status(201).json(result);
 };
 
 const listBackups = async (_req, res) => {
-  const backups = await listDatabaseBackups();
-  return res.json(backups);
+  const [items, status] = await Promise.all([listDatabaseBackups(), getBackupStatus()]);
+  return res.json({ items, status });
 };
 
 const restoreBackup = async (req, res) => {

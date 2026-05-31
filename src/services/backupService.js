@@ -3,10 +3,43 @@ const os = require("os");
 const path = require("path");
 const mongoose = require("mongoose");
 const { EJSON } = require("bson");
+const BackupSnapshot = require("../models/BackupSnapshot");
 const { uploadFileToR2, listFilesFromR2, deleteFileFromR2, downloadFileFromR2 } = require("../utils/r2Client");
 
 const BACKUP_PREFIX = "backups/mongodb";
 const RETENTION_DAYS = 30;
+const SNAPSHOT_KEY = "latest";
+const DEFAULT_INTERVAL_HOURS = 24;
+
+const getIntervalMs = () => {
+  const hours = Number.parseInt(String(process.env.BACKUP_INTERVAL_HOURS || DEFAULT_INTERVAL_HOURS), 10);
+  return Math.max(1, Number.isFinite(hours) ? hours : DEFAULT_INTERVAL_HOURS) * 60 * 60 * 1000;
+};
+
+const isAutoBackupEnabled = () =>
+  ["1", "true", "yes", "on"].includes(String(process.env.BACKUP_AUTO_ENABLED || "true").toLowerCase());
+
+const recordBackupRun = async ({ initiatedBy, status, startedAt, error = "", backupKey = "" }) => {
+  const now = startedAt || new Date();
+  const nextRunAt = new Date(now.getTime() + getIntervalMs());
+
+  await BackupSnapshot.findOneAndUpdate(
+    { key: SNAPSHOT_KEY },
+    {
+      $setOnInsert: { firstRunAt: now },
+      $set: {
+        lastRunAt: now,
+        nextRunAt,
+        lastInitiatedBy: initiatedBy,
+        lastStatus: status,
+        lastError: status === "failure" ? error : "",
+        ...(status === "success" ? { lastSuccessAt: now, lastBackupKey: backupKey } : {}),
+      },
+      $inc: { totalRuns: 1 },
+    },
+    { upsert: true, returnDocument: "after", setDefaultsOnInsert: true }
+  );
+};
 
 const sanitizeTimestamp = (date = new Date()) => date.toISOString().replace(/[:.]/g, "-");
 
@@ -63,6 +96,58 @@ const listDatabaseBackups = async () => {
     }));
 };
 
+const getBackupStatus = async () => {
+  const snapshot = await BackupSnapshot.findOne({ key: SNAPSHOT_KEY });
+  const items = await listDatabaseBackups();
+  const fileTimes = items
+    .map((item) => (item.lastModified ? new Date(item.lastModified).getTime() : 0))
+    .filter((value) => value > 0);
+
+  const firstBackupFileAt = fileTimes.length ? new Date(Math.min(...fileTimes)).toISOString() : null;
+  const lastBackupFileAt = fileTimes.length ? new Date(Math.max(...fileTimes)).toISOString() : null;
+  const intervalHours = Math.round(getIntervalMs() / (60 * 60 * 1000));
+
+  return {
+    firstRunAt: snapshot?.firstRunAt?.toISOString() || firstBackupFileAt,
+    lastRunAt: snapshot?.lastRunAt?.toISOString() || lastBackupFileAt,
+    lastSuccessAt: snapshot?.lastSuccessAt?.toISOString() || null,
+    nextRunAt: snapshot?.nextRunAt?.toISOString() || null,
+    lastInitiatedBy: snapshot?.lastInitiatedBy || "",
+    lastStatus: snapshot?.lastStatus || "unknown",
+    lastError: snapshot?.lastError || "",
+    lastBackupKey: snapshot?.lastBackupKey || "",
+    totalRuns: snapshot?.totalRuns || 0,
+    totalBackupFiles: items.length,
+    firstBackupFileAt,
+    lastBackupFileAt,
+    autoBackupEnabled: isAutoBackupEnabled(),
+    intervalHours,
+  };
+};
+
+const runBackupJob = async ({ initiatedBy = "system" } = {}) => {
+  const startedAt = new Date();
+  try {
+    const result = await createDatabaseBackup({ initiatedBy });
+    await pruneOldBackups({ retentionDays: RETENTION_DAYS });
+    await recordBackupRun({
+      initiatedBy,
+      status: "success",
+      startedAt,
+      backupKey: result.key,
+    });
+    return result;
+  } catch (error) {
+    await recordBackupRun({
+      initiatedBy,
+      status: "failure",
+      startedAt,
+      error: error.message || "Backup failed",
+    });
+    throw error;
+  }
+};
+
 const pruneOldBackups = async ({ retentionDays = RETENTION_DAYS } = {}) => {
   const files = await listFilesFromR2(BACKUP_PREFIX);
   const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
@@ -99,15 +184,12 @@ const restoreDatabaseBackup = async ({ backupKey }) => {
 };
 
 const startAutoBackupScheduler = () => {
-  const enabled = ["1", "true", "yes", "on"].includes(String(process.env.BACKUP_AUTO_ENABLED || "true").toLowerCase());
-  if (!enabled) return;
-  const intervalHours = Number.parseInt(String(process.env.BACKUP_INTERVAL_HOURS || "24"), 10);
-  const intervalMs = Math.max(1, Number.isFinite(intervalHours) ? intervalHours : 24) * 60 * 60 * 1000;
+  if (!isAutoBackupEnabled()) return;
+  const intervalMs = getIntervalMs();
 
   const run = async () => {
     try {
-      await createDatabaseBackup({ initiatedBy: "auto-scheduler" });
-      await pruneOldBackups({ retentionDays: RETENTION_DAYS });
+      await runBackupJob({ initiatedBy: "auto-scheduler" });
       console.log("[Backup] Auto backup completed");
     } catch (error) {
       console.error("[Backup] Auto backup failed:", error.message);
@@ -121,7 +203,10 @@ const startAutoBackupScheduler = () => {
 module.exports = {
   createDatabaseBackup,
   listDatabaseBackups,
+  getBackupStatus,
+  runBackupJob,
   pruneOldBackups,
   restoreDatabaseBackup,
   startAutoBackupScheduler,
+  getIntervalMs,
 };

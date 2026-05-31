@@ -1,10 +1,15 @@
 require("dotenv").config({ path: require("path").join(__dirname, "..", ".env") });
-const { configureR2Cors, getDefaultCorsOrigins } = require("../src/utils/r2Client");
+const connectDB = require("../src/config/db");
+const { configureAllR2Cors, getDefaultCorsOrigins } = require("../src/utils/r2Client");
 
 const main = async () => {
+  await connectDB();
   const origins = getDefaultCorsOrigins();
-  const { bucket } = await configureR2Cors(origins);
-  console.log(`[R2] CORS configured for bucket "${bucket}"`);
+  const results = await configureAllR2Cors(origins);
+
+  for (const result of results) {
+    console.log(`[R2] CORS configured for "${result.name}" (bucket: ${result.bucket})`);
+  }
   console.log("[R2] Allowed origins:", origins.join(", "));
 };
 

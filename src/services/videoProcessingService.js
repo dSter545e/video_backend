@@ -96,6 +96,7 @@ const processAndUploadVideoVariants = async ({
   localInputPath,
   originalName,
   title,
+  serverConfig,
   onVariantProgress,
   shouldAbort,
   onVariantStart,
@@ -173,6 +174,7 @@ const processAndUploadVideoVariants = async ({
                   });
                 }
               : undefined,
+          serverConfig,
         });
         uploadedHlsKeys.push(uploaded.key);
         if (variantFileName.endsWith(".m3u8")) {
@@ -207,6 +209,7 @@ const processAndUploadVideoVariants = async ({
       localFilePath: masterPlaylistPath,
       objectKey: masterObjectKey,
       contentType: "application/vnd.apple.mpegurl",
+      serverConfig,
     });
     uploadedHlsKeys.push(uploadedMaster.key);
 
@@ -221,7 +224,7 @@ const processAndUploadVideoVariants = async ({
   } catch (error) {
     for (const key of uploadedHlsKeys) {
       try {
-        await deleteFileFromR2(key);
+        await deleteFileFromR2(key, serverConfig);
       } catch (_cleanupError) {
         // ignore cleanup failure
       }

@@ -2,11 +2,9 @@
  * Comma-separated browser origins (scheme + host + port, no trailing slash).
  * Example:
  *   CORS_ORIGINS=http://localhost:3000,http://localhost:3001,https://xhub4u.com,https://admin.xhub4u.com
- *
- * Falls back to R2_CORS_ORIGINS for older .env files.
  */
 const parseOriginsFromEnv = () => {
-  const raw = process.env.CORS_ORIGINS || process.env.R2_CORS_ORIGINS || "";
+  const raw = process.env.CORS_ORIGINS || "";
   if (!raw.trim()) {
     return [
       "http://localhost:3000",

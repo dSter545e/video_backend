@@ -23,8 +23,8 @@ const streamMedia = async (req, res) => {
   }
 
   try {
-    const client = createR2Client();
-    const { bucket } = getR2Config();
+    const client = await createR2Client();
+    const { bucket } = await getR2Config();
     const rangeHeader = typeof req.headers.range === "string" ? req.headers.range : undefined;
     const result = await client.send(
       new GetObjectCommand({

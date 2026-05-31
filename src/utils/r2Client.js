@@ -2,28 +2,38 @@ const { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand, ListO
 const fs = require("fs");
 const { Transform } = require("stream");
 
-const getR2Config = () => {
-  const accountId = process.env.R2_ACCOUNT_ID;
-  const accessKeyId = process.env.R2_ACCESS_KEY_ID;
-  const secretAccessKey = process.env.R2_SECRET_ACCESS_KEY;
-  const bucket = process.env.R2_BUCKET_NAME;
-  const publicBaseUrl = process.env.R2_PUBLIC_BASE_URL || "";
+const normalizeServerConfig = (serverConfig) => ({
+  accountId: serverConfig.accountId,
+  accessKeyId: serverConfig.accessKeyId,
+  secretAccessKey: serverConfig.secretAccessKey,
+  bucket: serverConfig.bucketName || serverConfig.bucket,
+  publicBaseUrl: serverConfig.publicBaseUrl || "",
+});
 
-  if (!accountId || !accessKeyId || !secretAccessKey || !bucket) {
-    throw new Error("R2 config missing. Set R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME");
-  }
-
-  return {
-    accountId,
-    accessKeyId,
-    secretAccessKey,
-    bucket,
-    publicBaseUrl,
-  };
+const resolveDefaultStorageServer = async () => {
+  const StorageServer = require("../models/StorageServer");
+  const defaultServer = await StorageServer.findOne({ isDefault: true, isActive: true });
+  if (defaultServer) return defaultServer;
+  return StorageServer.findOne({ isActive: true }).sort({ createdAt: 1 });
 };
 
-const createR2Client = () => {
-  const { accountId, accessKeyId, secretAccessKey } = getR2Config();
+const getR2Config = async (serverConfig = null) => {
+  if (serverConfig) {
+    return normalizeServerConfig(serverConfig);
+  }
+
+  const server = await resolveDefaultStorageServer();
+  if (!server) {
+    throw new Error("No active storage server configured. Add one in Admin → Storage.");
+  }
+
+  return normalizeServerConfig(server.toObject());
+};
+
+const getDefaultStorageServer = async () => resolveDefaultStorageServer();
+
+const createR2Client = async (serverConfig = null) => {
+  const { accountId, accessKeyId, secretAccessKey } = await getR2Config(serverConfig);
   return new S3Client({
     region: "auto",
     endpoint: `https://${accountId}.r2.cloudflarestorage.com`,
@@ -51,18 +61,15 @@ const getPublicFileUrl = ({ bucket, objectKey, publicBaseUrl }) => {
 
   const cleanedBase = publicBaseUrl.replace(/\/$/, "");
   if (cleanedBase.includes(".r2.cloudflarestorage.com")) {
-    console.warn(
-      "[R2] R2_PUBLIC_BASE_URL uses private cloudflarestorage endpoint. Using public r2.dev URL instead."
-    );
     return fallbackR2Dev;
   }
 
   return `${cleanedBase}/${normalizedKey}`;
 };
 
-const uploadFileToR2 = async ({ localFilePath, objectKey, contentType, onProgress, preferBufferUpload = false }) => {
-  const client = createR2Client();
-  const { bucket, publicBaseUrl } = getR2Config();
+const uploadFileToR2 = async ({ localFilePath, objectKey, contentType, onProgress, preferBufferUpload = false, serverConfig = null }) => {
+  const client = await createR2Client(serverConfig);
+  const { bucket, publicBaseUrl } = await getR2Config(serverConfig);
   const totalBytes = fs.statSync(localFilePath).size;
   const startedAt = Date.now();
   let uploadedBytes = 0;
@@ -164,10 +171,10 @@ const uploadFileToR2 = async ({ localFilePath, objectKey, contentType, onProgres
   return { url, key: objectKey };
 };
 
-const deleteFileFromR2 = async (objectKey) => {
+const deleteFileFromR2 = async (objectKey, serverConfig = null) => {
   if (!objectKey) return;
-  const client = createR2Client();
-  const { bucket } = getR2Config();
+  const client = await createR2Client(serverConfig);
+  const { bucket } = await getR2Config(serverConfig);
   await client.send(
     new DeleteObjectCommand({
       Bucket: bucket,
@@ -184,10 +191,10 @@ const streamToBuffer = async (stream) => {
   return Buffer.concat(chunks);
 };
 
-const downloadFileFromR2 = async (objectKey) => {
+const downloadFileFromR2 = async (objectKey, serverConfig = null) => {
   if (!objectKey) throw new Error("objectKey is required");
-  const client = createR2Client();
-  const { bucket } = getR2Config();
+  const client = await createR2Client(serverConfig);
+  const { bucket } = await getR2Config(serverConfig);
   const result = await client.send(
     new GetObjectCommand({
       Bucket: bucket,
@@ -197,9 +204,9 @@ const downloadFileFromR2 = async (objectKey) => {
   return streamToBuffer(result.Body);
 };
 
-const listFilesFromR2 = async (prefix = "") => {
-  const client = createR2Client();
-  const { bucket } = getR2Config();
+const listFilesFromR2 = async (prefix = "", serverConfig = null) => {
+  const client = await createR2Client(serverConfig);
+  const { bucket } = await getR2Config(serverConfig);
   const items = [];
   let continuationToken = undefined;
   do {
@@ -236,9 +243,9 @@ const { parseOriginsFromEnv } = require("../config/cors");
 
 const getDefaultCorsOrigins = () => parseOriginsFromEnv();
 
-const configureR2Cors = async (allowedOrigins = getDefaultCorsOrigins()) => {
-  const client = createR2Client();
-  const { bucket } = getR2Config();
+const configureR2Cors = async (allowedOrigins = getDefaultCorsOrigins(), serverConfig = null) => {
+  const client = await createR2Client(serverConfig);
+  const { bucket } = await getR2Config(serverConfig);
   const origins = Array.from(new Set(allowedOrigins.filter(Boolean)));
 
   await client.send(
@@ -261,6 +268,39 @@ const configureR2Cors = async (allowedOrigins = getDefaultCorsOrigins()) => {
   return { bucket, origins };
 };
 
+const configureAllR2Cors = async (allowedOrigins = getDefaultCorsOrigins()) => {
+  const StorageServer = require("../models/StorageServer");
+  const servers = await StorageServer.find({ isActive: true }).sort({ isDefault: -1, name: 1 });
+  if (!servers.length) {
+    throw new Error("No active storage servers configured. Add one in Admin → Storage.");
+  }
+
+  const results = [];
+  for (const server of servers) {
+    const config = server.toObject();
+    const result = await configureR2Cors(allowedOrigins, config);
+    results.push({ serverId: server._id, name: server.name, ...result });
+  }
+  return results;
+};
+
+const headBucketInR2 = async (serverConfig = null) => {
+  const { HeadBucketCommand } = require("@aws-sdk/client-s3");
+  const client = await createR2Client(serverConfig);
+  const { bucket } = await getR2Config(serverConfig);
+  await client.send(new HeadBucketCommand({ Bucket: bucket }));
+  return { bucket };
+};
+
+const headObjectInR2 = async (objectKey, serverConfig = null) => {
+  if (!objectKey) throw new Error("objectKey is required");
+  const { HeadObjectCommand } = require("@aws-sdk/client-s3");
+  const client = await createR2Client(serverConfig);
+  const { bucket } = await getR2Config(serverConfig);
+  await client.send(new HeadObjectCommand({ Bucket: bucket, Key: objectKey }));
+  return { bucket, key: objectKey };
+};
+
 module.exports = {
   uploadFileToR2,
   deleteFileFromR2,
@@ -268,7 +308,11 @@ module.exports = {
   listFilesFromR2,
   extractObjectKeyFromUrl,
   configureR2Cors,
+  configureAllR2Cors,
   getDefaultCorsOrigins,
   createR2Client,
   getR2Config,
+  getDefaultStorageServer,
+  headBucketInR2,
+  headObjectInR2,
 };

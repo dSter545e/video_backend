@@ -4,7 +4,7 @@ const { processAndUploadVideoVariants } = require("../services/videoProcessingSe
 
 const activeJobs = new Map();
 
-const startVideoProcessingJob = ({ videoId, localInputPath, originalName, title }) => {
+const startVideoProcessingJob = ({ videoId, localInputPath, originalName, title, serverConfig }) => {
   const jobState = { cancelled: false };
   activeJobs.set(videoId, jobState);
 
@@ -26,6 +26,7 @@ const startVideoProcessingJob = ({ videoId, localInputPath, originalName, title 
         localInputPath,
         originalName,
         title,
+        serverConfig,
         shouldAbort: () => jobState.cancelled,
         onVariantPlan: (plan) => {
           metrics.variants.total = plan.total;

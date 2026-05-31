@@ -15,7 +15,10 @@ const analyticsRoutes = require("./routes/analyticsRoutes");
 const backupRoutes = require("./routes/backupRoutes");
 const mediaRoutes = require("./routes/mediaRoutes");
 const removalRequestRoutes = require("./routes/removalRequestRoutes");
+const storageServerRoutes = require("./routes/storageServerRoutes");
+const healthMonitorRoutes = require("./routes/healthMonitorRoutes");
 const { startAutoBackupScheduler } = require("./services/backupService");
+const { startHealthMonitorScheduler } = require("./services/healthMonitorService");
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -42,6 +45,8 @@ app.use("/api/analytics", analyticsRoutes);
 app.use("/api/backups", backupRoutes);
 app.use("/api/media", mediaRoutes);
 app.use("/api/removal-requests", removalRequestRoutes);
+app.use("/api/storage-servers", storageServerRoutes);
+app.use("/api/health-monitor", healthMonitorRoutes);
 
 app.use((req, res) => {
   res.status(404).json({ error: `Route not found: ${req.method} ${req.originalUrl}` });
@@ -83,6 +88,7 @@ const start = async () => {
     const preferredPort = Number(PORT);
     const { server, port } = await listenOnFixedPort(preferredPort);
     startAutoBackupScheduler();
+    startHealthMonitorScheduler();
     console.log(`Server running on http://localhost:${port}`);
     server.on("error", (error) => {
       console.error("Server runtime error:", error);

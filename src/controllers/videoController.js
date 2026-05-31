@@ -1,5 +1,6 @@
 const fs = require("fs");
 const mongoose = require("mongoose");
+const StorageServer = require("../models/StorageServer");
 const Video = require("../models/Video");
 const Category = require("../models/Category");
 const VideoReaction = require("../models/VideoReaction");
@@ -30,8 +31,17 @@ const resolveVideoFilter = (identifier) => {
   }
   return { $or: [{ slug: trimmed }, { videoId: trimmed }] };
 };
-const resolveCategoryFilter = (identifier) =>
-  isValidObjectId(identifier) ? { $or: [{ _id: identifier }, { slug: identifier }] } : { slug: identifier };
+const resolveStorageServerConfig = async (storageServerId) => {
+  if (!storageServerId) return null;
+  const server = await StorageServer.findById(storageServerId);
+  return server?.isActive ? server.toObject() : null;
+};
+
+const resolveDefaultStorageServer = async () => {
+  const defaultServer = await StorageServer.findOne({ isDefault: true, isActive: true });
+  if (defaultServer) return defaultServer;
+  return StorageServer.findOne({ isActive: true }).sort({ createdAt: 1 });
+};
 
 const normalizeTagName = (value = "") => value.trim().toLowerCase().replace(/\s+/g, " ");
 const coerceTagsInput = (...values) => {
@@ -162,13 +172,14 @@ const attachEngagementDataToList = async (videos) => {
   });
 };
 
-const uploadThumbnailIfPresent = async (file) => {
+const uploadThumbnailIfPresent = async (file, serverConfig = null) => {
   if (!file) return null;
   const objectKey = `images/thumbnails/${Date.now()}-${file.filename}`;
   const uploaded = await uploadFileToR2({
     localFilePath: file.path,
     objectKey,
     contentType: file.mimetype || "image/jpeg",
+    serverConfig,
   });
   return uploaded;
 };
@@ -485,8 +496,15 @@ const createProcessedVideo = async (req, res) => {
   const finalStatus = FINAL_VIDEO_STATUSES.includes(status) ? normalizeFinalStatus(status) : "public";
   let uploadedThumbKey = "";
   let workerStarted = false;
+  let serverConfig = null;
   try {
-    const uploadedThumb = await uploadThumbnailIfPresent(uploadedThumbnailFile);
+    const defaultServer = await resolveDefaultStorageServer();
+    if (!defaultServer) {
+      return res.status(503).json({ error: "No active storage server configured. Add one in Admin → Storage." });
+    }
+    serverConfig = defaultServer.toObject();
+
+    const uploadedThumb = await uploadThumbnailIfPresent(uploadedThumbnailFile, serverConfig);
     uploadedThumbKey = uploadedThumb?.key || "";
 
     const tagIds = await resolveTags(resolveIncomingTags(req.body));
@@ -510,6 +528,7 @@ const createProcessedVideo = async (req, res) => {
       finalStatus,
       category: category._id,
       tags: tagIds,
+      storageServer: defaultServer._id,
     });
 
     await video.populate("category", "name imageUrl");
@@ -521,6 +540,7 @@ const createProcessedVideo = async (req, res) => {
       localInputPath: uploadedVideoFile.path,
       originalName: uploadedVideoFile.originalname,
       title,
+      serverConfig,
     });
     workerStarted = true;
 
@@ -528,7 +548,7 @@ const createProcessedVideo = async (req, res) => {
   } catch (error) {
     if (uploadedThumbKey) {
       try {
-        await deleteFileFromR2(uploadedThumbKey);
+        await deleteFileFromR2(uploadedThumbKey, serverConfig);
       } catch (_deleteError) {
         // ignore cleanup failure
       }
@@ -597,11 +617,13 @@ const updateVideo = async (req, res) => {
         })
       : existing.slug;
 
-    const uploadedThumb = await uploadThumbnailIfPresent(uploadedThumbnailFile);
+    const serverConfig = await resolveStorageServerConfig(existing.storageServer);
+
+    const uploadedThumb = await uploadThumbnailIfPresent(uploadedThumbnailFile, serverConfig);
     const existingThumbnailKey = existing.thumbnailKey || extractObjectKeyFromUrl(existing.thumbnail);
     if (uploadedThumb?.key && existingThumbnailKey) {
       try {
-        await deleteFileFromR2(existingThumbnailKey);
+        await deleteFileFromR2(existingThumbnailKey, serverConfig);
       } catch (error) {
       }
     }
@@ -678,9 +700,11 @@ const deleteVideo = async (req, res) => {
     }
   }
 
+  const serverConfig = await resolveStorageServerConfig(deleted.storageServer);
+
   for (const key of keysToDelete) {
     try {
-      await deleteFileFromR2(key);
+      await deleteFileFromR2(key, serverConfig);
     } catch (error) {
     }
   }
