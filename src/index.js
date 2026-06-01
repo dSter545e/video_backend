@@ -17,6 +17,7 @@ const mediaRoutes = require("./routes/mediaRoutes");
 const removalRequestRoutes = require("./routes/removalRequestRoutes");
 const storageServerRoutes = require("./routes/storageServerRoutes");
 const healthMonitorRoutes = require("./routes/healthMonitorRoutes");
+const adRoutes = require("./routes/adRoutes");
 const { startAutoBackupScheduler } = require("./services/backupService");
 const { startHealthMonitorScheduler } = require("./services/healthMonitorService");
 
@@ -47,6 +48,7 @@ app.use("/api/media", mediaRoutes);
 app.use("/api/removal-requests", removalRequestRoutes);
 app.use("/api/storage-servers", storageServerRoutes);
 app.use("/api/health-monitor", healthMonitorRoutes);
+app.use("/api/ads", adRoutes);
 
 app.use((req, res) => {
   res.status(404).json({ error: `Route not found: ${req.method} ${req.originalUrl}` });
