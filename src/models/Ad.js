@@ -1,5 +1,6 @@
 const mongoose = require("mongoose");
 const { AD_SLOT_IDS, AD_PAGE_KEYS } = require("../constants/adSlots");
+const { AD_DEVICE_KEYS } = require("../constants/adDevices");
 
 const adSchema = new mongoose.Schema(
   {
@@ -19,6 +20,16 @@ const adSchema = new mongoose.Schema(
           return Array.isArray(values) && values.length > 0 && values.every((page) => AD_PAGE_KEYS.includes(page));
         },
         message: "Invalid page targeting",
+      },
+    },
+    devices: {
+      type: [String],
+      default: ["all"],
+      validate: {
+        validator(values) {
+          return Array.isArray(values) && values.length > 0 && values.every((device) => AD_DEVICE_KEYS.includes(device));
+        },
+        message: "Invalid device targeting",
       },
     },
     inFeedEvery: { type: Number, default: 10, min: 4, max: 50 },

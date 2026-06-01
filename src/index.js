@@ -91,7 +91,6 @@ const start = async () => {
     const { server, port } = await listenOnFixedPort(preferredPort);
     startAutoBackupScheduler();
     startHealthMonitorScheduler();
-    console.log(`Server running on http://localhost:${port}`);
     server.on("error", (error) => {
       console.error("Server runtime error:", error);
     });
