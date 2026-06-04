@@ -17,6 +17,14 @@ const {
 } = require("../controllers/videoController");
 const { adminAuth } = require("../middleware/authMiddleware");
 const { uploadVideoMedia } = require("../middleware/uploadMiddleware");
+const { handleUpload } = require("../middleware/handleUpload");
+
+const processUploadFields = uploadVideoMedia.fields([
+  { name: "video", maxCount: 1 },
+  { name: "thumbnailImage", maxCount: 1 },
+]);
+
+const thumbnailOnlyFields = uploadVideoMedia.fields([{ name: "thumbnailImage", maxCount: 1 }]);
 
 const router = express.Router();
 
@@ -32,16 +40,8 @@ router.post("/:id/comments", addVideoComment);
 router.post("/:id/tags", addVideoTags);
 router.post("/", adminAuth, createVideo);
 router.post("/upload", adminAuth, createVideo);
-router.post(
-  "/process-upload",
-  adminAuth,
-  uploadVideoMedia.fields([
-    { name: "video", maxCount: 1 },
-    { name: "thumbnailImage", maxCount: 1 },
-  ]),
-  createProcessedVideo
-);
-router.put("/:id", adminAuth, uploadVideoMedia.fields([{ name: "thumbnailImage", maxCount: 1 }]), updateVideo);
+router.post("/process-upload", adminAuth, handleUpload(processUploadFields), createProcessedVideo);
+router.put("/:id", adminAuth, handleUpload(thumbnailOnlyFields), updateVideo);
 router.delete("/:id", adminAuth, deleteVideo);
 
 module.exports = router;

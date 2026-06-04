@@ -2,6 +2,8 @@ const multer = require("multer");
 const path = require("path");
 const os = require("os");
 
+const MAX_FILE_BYTES = Number(process.env.UPLOAD_MAX_FILE_MB || 1024) * 1024 * 1024;
+
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, os.tmpdir()),
   filename: (_req, file, cb) => {
@@ -12,7 +14,7 @@ const storage = multer.diskStorage({
 
 const uploadVideoFile = multer({
   storage,
-  limits: { fileSize: 1024 * 1024 * 1024 },
+  limits: { fileSize: MAX_FILE_BYTES },
   fileFilter: (_req, file, cb) => {
     if (file.mimetype.startsWith("video/")) {
       cb(null, true);
@@ -36,7 +38,7 @@ const uploadImageFile = multer({
 
 const uploadVideoMedia = multer({
   storage,
-  limits: { fileSize: 1024 * 1024 * 1024 },
+  limits: { fileSize: MAX_FILE_BYTES },
   fileFilter: (_req, file, cb) => {
     if (file.fieldname === "video") {
       if (!file.mimetype.startsWith("video/")) {

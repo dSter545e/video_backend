@@ -54,9 +54,14 @@ app.use((req, res) => {
   res.status(404).json({ error: `Route not found: ${req.method} ${req.originalUrl}` });
 });
 
-app.use((error, _req, res, _next) => {
+app.use((error, req, res, _next) => {
   console.error("Unhandled API error:", error);
-  res.status(500).json({ error: "Internal server error" });
+  if (res.headersSent) return;
+  if (error?.code === "ECONNABORTED" || error?.message?.includes("aborted")) {
+    res.status(408).json({ error: "Upload timed out. Try again or use a faster connection." });
+    return;
+  }
+  res.status(500).json({ error: error?.message || "Internal server error" });
 });
 
 const registerProcessErrorHandlers = () => {
@@ -70,11 +75,28 @@ const registerProcessErrorHandlers = () => {
   });
 };
 
+const configureServerForLargeUploads = (server) => {
+  // Node 18+ defaults requestTimeout to 5 minutes — large videos need longer.
+  const requestTimeoutMs = Number(process.env.UPLOAD_REQUEST_TIMEOUT_MS || 0);
+  server.requestTimeout = requestTimeoutMs > 0 ? requestTimeoutMs : 0;
+  server.headersTimeout = Number(process.env.UPLOAD_HEADERS_TIMEOUT_MS || 120000);
+  server.keepAliveTimeout = Number(process.env.UPLOAD_KEEP_ALIVE_TIMEOUT_MS || 65000);
+  server.timeout = Number(process.env.UPLOAD_SOCKET_TIMEOUT_MS || 0);
+  server.maxRequestsPerSocket = 0;
+};
+
 const listenOnFixedPort = async (port) =>
   new Promise((resolve, reject) => {
     const server = app.listen(port);
+    configureServerForLargeUploads(server);
 
     server.once("listening", () => {
+      const uploadLimitMb = process.env.UPLOAD_MAX_FILE_MB || "1024";
+      const requestTimeoutLabel =
+        server.requestTimeout === 0 ? "disabled" : `${server.requestTimeout}ms`;
+      console.log(
+        `Upload limits: max file ${uploadLimitMb}MB, request timeout ${requestTimeoutLabel}`
+      );
       resolve({ server, port });
     });
 
