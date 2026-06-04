@@ -1,6 +1,14 @@
 const fs = require("fs");
 const Video = require("../models/Video");
-const { processAndUploadVideoVariants } = require("../services/videoProcessingService");
+const {
+  processAndUploadVideoVariants,
+  extractAndUploadThumbnailFromVideo,
+} = require("../services/videoProcessingService");
+
+const hasCustomThumbnail = (value) => {
+  const url = typeof value === "string" ? value.trim() : "";
+  return Boolean(url && url !== "about:blank");
+};
 
 const activeJobs = new Map();
 
@@ -22,6 +30,12 @@ const startVideoProcessingJob = ({ videoId, localInputPath, originalName, title,
         throw new Error("VIDEO_PROCESS_CANCELLED");
       }
 
+      const currentVideo = await Video.findById(videoId).select("thumbnail finalStatus");
+      if (!currentVideo) {
+        throw new Error("VIDEO_PROCESS_CANCELLED");
+      }
+      const shouldGenerateThumbnail = !hasCustomThumbnail(currentVideo.thumbnail);
+
       const processed = await processAndUploadVideoVariants({
         localInputPath,
         originalName,
@@ -42,22 +56,39 @@ const startVideoProcessingJob = ({ videoId, localInputPath, originalName, title,
         },
       });
 
-      const currentVideo = await Video.findById(videoId).select("finalStatus");
-      if (jobState.cancelled || !currentVideo) {
+      if (jobState.cancelled) {
         throw new Error("VIDEO_PROCESS_CANCELLED");
       }
-      const nextStatus = currentVideo?.finalStatus === "active" ? "public" : currentVideo?.finalStatus || "public";
+      const nextStatus = currentVideo.finalStatus === "active" ? "public" : currentVideo.finalStatus || "public";
+
+      const updateFields = {
+        videoUrl: processed.masterUrl,
+        sourceVideoKey: processed.masterKey || "",
+        hlsKeys: processed.hlsKeys || [],
+        qualityVariants: processed.variants,
+        maxSourceHeight: processed.maxSourceHeight,
+        durationSeconds: processed.durationSeconds,
+        processingStatus: nextStatus,
+      };
+
+      if (shouldGenerateThumbnail) {
+        try {
+          const autoThumb = await extractAndUploadThumbnailFromVideo({
+            localInputPath,
+            title,
+            serverConfig,
+          });
+          if (autoThumb?.url) {
+            updateFields.thumbnail = autoThumb.url;
+            updateFields.thumbnailKey = autoThumb.key || "";
+          }
+        } catch (_thumbError) {
+          // Video can still publish without a thumbnail; frontend may use video poster fallback.
+        }
+      }
 
       await Video.findByIdAndUpdate(videoId, {
-        $set: {
-          videoUrl: processed.masterUrl,
-          sourceVideoKey: processed.masterKey || "",
-          hlsKeys: processed.hlsKeys || [],
-          qualityVariants: processed.variants,
-          maxSourceHeight: processed.maxSourceHeight,
-          durationSeconds: processed.durationSeconds,
-          processingStatus: nextStatus,
-        },
+        $set: updateFields,
       });
     } catch (error) {
       if (error.message !== "VIDEO_PROCESS_CANCELLED") {

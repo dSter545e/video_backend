@@ -238,6 +238,52 @@ const processAndUploadVideoVariants = async ({
   }
 };
 
+const extractAndUploadThumbnailFromVideo = async ({ localInputPath, title, serverConfig }) => {
+  const probe = await probeVideo(localInputPath);
+  const duration = probe.durationSeconds > 0 ? probe.durationSeconds : 0;
+  const seekSeconds =
+    duration > 12 ? Math.min(8, Math.max(2, duration * 0.15)) : duration > 2 ? 1 : 0;
+
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ott-thumb-"));
+  const outputPath = path.join(tempDir, "thumb.jpg");
+
+  try {
+    await execFileAsync(ffmpegPath, [
+      "-y",
+      "-ss",
+      String(seekSeconds),
+      "-i",
+      localInputPath,
+      "-frames:v",
+      "1",
+      "-q:v",
+      "2",
+      "-vf",
+      "scale=1280:-2",
+      outputPath,
+    ]);
+
+    if (!fs.existsSync(outputPath)) {
+      throw new Error("Thumbnail frame was not created");
+    }
+
+    const safeName = (title || "video").replace(/[^a-zA-Z0-9-_]/g, "-");
+    const objectKey = `images/thumbnails/auto-${Date.now()}-${safeName}.jpg`;
+    const uploaded = await uploadFileToR2({
+      localFilePath: outputPath,
+      objectKey,
+      contentType: "image/jpeg",
+      serverConfig,
+    });
+
+    return uploaded;
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+};
+
 module.exports = {
   processAndUploadVideoVariants,
+  extractAndUploadThumbnailFromVideo,
+  probeVideo,
 };
