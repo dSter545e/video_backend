@@ -115,9 +115,12 @@ const backfillVideoPreviews = async () => {
         durationSeconds: video.durationSeconds,
       });
 
-      video.previewUrl = preview.url;
-      video.previewKey = preview.key;
-      await video.save();
+      await Video.findByIdAndUpdate(video._id, {
+        $set: {
+          previewUrl: preview.url,
+          previewKey: preview.key,
+        },
+      });
 
       if (previousPreviewKey && previousPreviewKey !== preview.key) {
         try {
