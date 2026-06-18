@@ -14,6 +14,8 @@ const videoSchema = new mongoose.Schema(
     description: { type: String, default: "" },
     thumbnail: { type: String, default: "" },
     thumbnailKey: { type: String, default: "" },
+    previewUrl: { type: String, default: "" },
+    previewKey: { type: String, default: "" },
     videoUrl: { type: String, required: true },
     sourceVideoKey: { type: String, default: "" },
     hlsKeys: [{ type: String }],
@@ -49,7 +51,7 @@ const videoSchema = new mongoose.Schema(
         ref: "VideoTag",
       },
     ],
-    category: { type: mongoose.Schema.Types.ObjectId, ref: "Category", required: true },
+    category: { type: mongoose.Schema.Types.ObjectId, ref: "Category", default: null },
     storageServer: { type: mongoose.Schema.Types.ObjectId, ref: "StorageServer" },
     healthStatus: {
       type: String,

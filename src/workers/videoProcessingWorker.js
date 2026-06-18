@@ -3,6 +3,7 @@ const Video = require("../models/Video");
 const {
   processAndUploadVideoVariants,
   extractAndUploadThumbnailFromVideo,
+  extractAndUploadPreviewClipFromVideo,
 } = require("../services/videoProcessingService");
 
 const hasCustomThumbnail = (value) => {
@@ -85,6 +86,21 @@ const startVideoProcessingJob = ({ videoId, localInputPath, originalName, title,
         } catch (_thumbError) {
           // Video can still publish without a thumbnail; frontend may use video poster fallback.
         }
+      }
+
+      try {
+        const autoPreview = await extractAndUploadPreviewClipFromVideo({
+          localInputPath,
+          title,
+          serverConfig,
+          durationSeconds: processed.durationSeconds,
+        });
+        if (autoPreview?.url) {
+          updateFields.previewUrl = autoPreview.url;
+          updateFields.previewKey = autoPreview.key || "";
+        }
+      } catch (_previewError) {
+        // Cards fall back to lowest HLS variant when no preview clip exists.
       }
 
       await Video.findByIdAndUpdate(videoId, {

@@ -5,6 +5,13 @@ const { execFile } = require("child_process");
 const ffmpegPath = require("ffmpeg-static");
 const ffprobePath = require("ffprobe-static").path;
 const { uploadFileToR2, deleteFileFromR2 } = require("../utils/r2Client");
+const {
+  getWatermarkSettings,
+  isWatermarkActive,
+  buildVariantWatermarkFilter,
+  buildThumbnailWatermarkFilter,
+  prepareWatermarkLogoFile,
+} = require("./watermarkService");
 
 const QUALITY_LADDER = [144, 240, 360, 480, 720, 1080];
 const BANDWIDTH_BY_HEIGHT = {
@@ -58,13 +65,33 @@ const getTargetHeights = (sourceHeight) => {
   return targets;
 };
 
-const transcodeVariantToHls = async ({ inputPath, outputPlaylistPath, targetHeight, segmentPatternPath }) => {
-  const args = [
-    "-y",
-    "-i",
-    inputPath,
-    "-vf",
-    `scale=-2:${targetHeight}`,
+const transcodeVariantToHls = async ({
+  inputPath,
+  outputPlaylistPath,
+  targetHeight,
+  segmentPatternPath,
+  watermark,
+  logoPath,
+}) => {
+  const args = ["-y", "-i", inputPath];
+  const useWatermark = isWatermarkActive(watermark);
+  const useLogo = useWatermark && watermark.mode === "logo" && logoPath;
+
+  if (useWatermark) {
+    if (useLogo) {
+      args.push("-i", logoPath);
+    }
+    const filter = buildVariantWatermarkFilter({
+      targetHeight,
+      watermark,
+      hasLogoInput: Boolean(useLogo),
+    });
+    args.push("-filter_complex", filter, "-map", "[vout]", "-map", "0:a?");
+  } else {
+    args.push("-vf", `scale=-2:${targetHeight}`);
+  }
+
+  args.push(
     "-c:v",
     "libx264",
     "-preset",
@@ -81,8 +108,8 @@ const transcodeVariantToHls = async ({ inputPath, outputPlaylistPath, targetHeig
     "vod",
     "-hls_segment_filename",
     segmentPatternPath,
-    outputPlaylistPath,
-  ];
+    outputPlaylistPath
+  );
   await execFileAsync(ffmpegPath, args);
 };
 
@@ -110,6 +137,12 @@ const processAndUploadVideoVariants = async ({
     total: targetHeights.length,
     heights: targetHeights,
   });
+
+  const watermark = await getWatermarkSettings();
+  let logoPath = null;
+  if (isWatermarkActive(watermark) && watermark.mode === "logo") {
+    logoPath = await prepareWatermarkLogoFile({ watermark, serverConfig });
+  }
 
   const baseName = `${Date.now()}-${(title || originalName || "video").replace(/[^a-zA-Z0-9-_]/g, "-")}`;
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ott-variants-"));
@@ -141,6 +174,8 @@ const processAndUploadVideoVariants = async ({
         outputPlaylistPath: outputPath,
         targetHeight: height,
         segmentPatternPath,
+        watermark,
+        logoPath,
       });
       const transcodedSizeBytes = fs.existsSync(outputPath) ? fs.statSync(outputPath).size : 0;
       onVariantTranscoded?.({
@@ -234,6 +269,9 @@ const processAndUploadVideoVariants = async ({
     }
     throw error;
   } finally {
+    if (logoPath) {
+      fs.rmSync(logoPath, { force: true });
+    }
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 };
@@ -244,24 +282,31 @@ const extractAndUploadThumbnailFromVideo = async ({ localInputPath, title, serve
   const seekSeconds =
     duration > 12 ? Math.min(8, Math.max(2, duration * 0.15)) : duration > 2 ? 1 : 0;
 
+  const watermark = await getWatermarkSettings();
+  const useWatermark = isWatermarkActive(watermark);
+  let logoPath = null;
+  if (useWatermark && watermark.mode === "logo") {
+    logoPath = await prepareWatermarkLogoFile({ watermark, serverConfig });
+  }
+
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ott-thumb-"));
   const outputPath = path.join(tempDir, "thumb.jpg");
 
   try {
-    await execFileAsync(ffmpegPath, [
-      "-y",
-      "-ss",
-      String(seekSeconds),
-      "-i",
-      localInputPath,
-      "-frames:v",
-      "1",
-      "-q:v",
-      "2",
-      "-vf",
-      "scale=1280:-2",
-      outputPath,
-    ]);
+    const thumbArgs = ["-y", "-ss", String(seekSeconds), "-i", localInputPath];
+    const useLogo = useWatermark && watermark.mode === "logo" && logoPath;
+
+    if (useWatermark) {
+      if (useLogo) {
+        thumbArgs.push("-i", logoPath);
+      }
+      const filter = buildThumbnailWatermarkFilter({ watermark, hasLogoInput: Boolean(useLogo) });
+      thumbArgs.push("-filter_complex", filter, "-map", "[vout]", "-frames:v", "1", "-q:v", "2", outputPath);
+    } else {
+      thumbArgs.push("-frames:v", "1", "-q:v", "2", "-vf", "scale=1280:-2", outputPath);
+    }
+
+    await execFileAsync(ffmpegPath, thumbArgs);
 
     if (!fs.existsSync(outputPath)) {
       throw new Error("Thumbnail frame was not created");
@@ -278,6 +323,72 @@ const extractAndUploadThumbnailFromVideo = async ({ localInputPath, title, serve
 
     return uploaded;
   } finally {
+    if (logoPath) {
+      fs.rmSync(logoPath, { force: true });
+    }
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+};
+
+const extractAndUploadPreviewClipFromVideo = async ({
+  localInputPath,
+  remoteInputUrl,
+  title,
+  serverConfig,
+  durationSeconds = 0,
+}) => {
+  const inputSource = localInputPath || remoteInputUrl;
+  if (!inputSource) {
+    throw new Error("Video input is required");
+  }
+
+  const probe = durationSeconds > 0 ? { durationSeconds } : await probeVideo(inputSource);
+  const duration = probe.durationSeconds > 0 ? probe.durationSeconds : 0;
+  const clipLength = Math.min(6, duration > 0 ? duration : 6);
+  const seekSeconds =
+    duration > 12 ? Math.min(8, Math.max(2, duration * 0.15)) : duration > 2 ? 1 : 0;
+
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ott-preview-"));
+  const outputPath = path.join(tempDir, "preview.mp4");
+
+  try {
+    await execFileAsync(ffmpegPath, [
+      "-y",
+      "-ss",
+      String(seekSeconds),
+      "-i",
+      inputSource,
+      "-t",
+      String(clipLength),
+      "-an",
+      "-vf",
+      "scale=-2:360",
+      "-c:v",
+      "libx264",
+      "-preset",
+      "veryfast",
+      "-crf",
+      "26",
+      "-movflags",
+      "+faststart",
+      outputPath,
+    ]);
+
+    if (!fs.existsSync(outputPath)) {
+      throw new Error("Preview clip was not created");
+    }
+
+    const safeName = (title || "video").replace(/[^a-zA-Z0-9-_]/g, "-");
+    const objectKey = `videos/previews/${Date.now()}-${safeName}.mp4`;
+    const uploaded = await uploadFileToR2({
+      localFilePath: outputPath,
+      objectKey,
+      contentType: "video/mp4",
+      serverConfig,
+    });
+
+    return uploaded;
+  } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 };
@@ -285,5 +396,6 @@ const extractAndUploadThumbnailFromVideo = async ({ localInputPath, title, serve
 module.exports = {
   processAndUploadVideoVariants,
   extractAndUploadThumbnailFromVideo,
+  extractAndUploadPreviewClipFromVideo,
   probeVideo,
 };

@@ -47,6 +47,10 @@ const withMediaProxyUrls = (video, req) => {
     nextVideo.videoUrl = rewriteStreamUrl(nextVideo.videoUrl, mediaBaseUrl);
   }
 
+  if (nextVideo.previewUrl) {
+    nextVideo.previewUrl = rewriteStreamUrl(nextVideo.previewUrl, mediaBaseUrl);
+  }
+
   if (Array.isArray(nextVideo.qualityVariants)) {
     nextVideo.qualityVariants = nextVideo.qualityVariants.map((variant) => ({
       ...variant,

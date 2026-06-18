@@ -450,13 +450,16 @@ const getVideosAdmin = async (req, res) => {
 const createVideo = async (req, res) => {
   const { title, description, thumbnail, videoUrl, categoryId, status, slug, tags = [] } = req.body;
 
-  if (!title || !videoUrl || !categoryId) {
-    return res.status(400).json({ error: "title, videoUrl and categoryId are required" });
+  if (!title || !videoUrl) {
+    return res.status(400).json({ error: "title and videoUrl are required" });
   }
 
-  const category = await Category.findOne(resolveCategoryFilter(categoryId)).select("_id");
-  if (!category) {
-    return res.status(404).json({ error: "Category not found" });
+  let category = null;
+  if (categoryId && String(categoryId).trim()) {
+    category = await Category.findOne(resolveCategoryFilter(categoryId)).select("_id");
+    if (!category) {
+      return res.status(404).json({ error: "Category not found" });
+    }
   }
 
   const tagIds = await resolveTags(resolveIncomingTags(req.body));
@@ -473,7 +476,7 @@ const createVideo = async (req, res) => {
     videoUrl,
     processingStatus: FINAL_VIDEO_STATUSES.includes(status) ? normalizeFinalStatus(status) : "public",
     finalStatus: FINAL_VIDEO_STATUSES.includes(status) ? normalizeFinalStatus(status) : "public",
-    category: category._id,
+    ...(category ? { category: category._id } : {}),
     tags: tagIds,
   });
 
@@ -488,13 +491,16 @@ const createProcessedVideo = async (req, res) => {
   const uploadedVideoFile = req.files?.video?.[0];
   const uploadedThumbnailFile = req.files?.thumbnailImage?.[0];
 
-  if (!title || !categoryId || !uploadedVideoFile) {
-    return res.status(400).json({ error: "title, categoryId and video file are required" });
+  if (!title || !uploadedVideoFile) {
+    return res.status(400).json({ error: "title and video file are required" });
   }
 
-  const category = await Category.findOne(resolveCategoryFilter(categoryId)).select("_id");
-  if (!category) {
-    return res.status(404).json({ error: "Category not found" });
+  let category = null;
+  if (categoryId && String(categoryId).trim()) {
+    category = await Category.findOne(resolveCategoryFilter(categoryId)).select("_id");
+    if (!category) {
+      return res.status(404).json({ error: "Category not found" });
+    }
   }
 
   const finalStatus = FINAL_VIDEO_STATUSES.includes(status) ? normalizeFinalStatus(status) : "public";
@@ -530,7 +536,7 @@ const createProcessedVideo = async (req, res) => {
       qualityVariants: [],
       processingStatus: "processing",
       finalStatus,
-      category: category._id,
+      ...(category ? { category: category._id } : {}),
       tags: tagIds,
       storageServer: defaultServer._id,
     });
@@ -598,7 +604,7 @@ const updateVideo = async (req, res) => {
   const { title, description, thumbnail, videoUrl, categoryId, status, slug, tags } = req.body;
   const uploadedThumbnailFile = req.files?.thumbnailImage?.[0];
 
-  if (categoryId) {
+  if (categoryId !== undefined && categoryId && String(categoryId).trim()) {
     const category = await Category.findOne(resolveCategoryFilter(categoryId)).select("_id");
     if (!category) {
       return res.status(404).json({ error: "Category not found" });
@@ -610,7 +616,18 @@ const updateVideo = async (req, res) => {
     if (!existing) {
       return res.status(404).json({ error: "Video not found" });
     }
-    const resolvedCategory = categoryId ? await Category.findOne(resolveCategoryFilter(categoryId)).select("_id") : null;
+    let resolvedCategory = null;
+    let unsetCategory = false;
+    if (categoryId !== undefined) {
+      if (categoryId && String(categoryId).trim()) {
+        resolvedCategory = await Category.findOne(resolveCategoryFilter(categoryId)).select("_id");
+        if (!resolvedCategory) {
+          return res.status(404).json({ error: "Category not found" });
+        }
+      } else {
+        unsetCategory = true;
+      }
+    }
     const nextVideoTitle = (title || existing.title || "").trim();
     const shouldRegenerateSlug = slug !== undefined || (title !== undefined && nextVideoTitle !== existing.title);
     const nextSlug = shouldRegenerateSlug
@@ -650,7 +667,12 @@ const updateVideo = async (req, res) => {
       updateDoc.tags = tagIds;
     }
 
-    const updated = await Video.findByIdAndUpdate(existing._id, { $set: updateDoc }, { returnDocument: "after" })
+    const mongoUpdate = { $set: updateDoc };
+    if (unsetCategory) {
+      mongoUpdate.$unset = { category: 1 };
+    }
+
+    const updated = await Video.findByIdAndUpdate(existing._id, mongoUpdate, { returnDocument: "after" })
       .populate("category", "name imageUrl")
       .populate("tags", "name displayName");
 
@@ -687,6 +709,10 @@ const deleteVideo = async (req, res) => {
   const thumbnailKey = deleted.thumbnailKey || extractObjectKeyFromUrl(deleted.thumbnail);
   if (thumbnailKey) {
     keysToDelete.push(thumbnailKey);
+  }
+  const previewKey = deleted.previewKey || extractObjectKeyFromUrl(deleted.previewUrl);
+  if (previewKey) {
+    keysToDelete.push(previewKey);
   }
   if (Array.isArray(deleted.qualityVariants)) {
     for (const variant of deleted.qualityVariants) {
