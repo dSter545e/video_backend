@@ -147,6 +147,10 @@ const getTargetHeights = (sourceHeight) => {
   return targets;
 };
 
+/** Scale down so the longest edge is at most maxEdge; never pad or crop. */
+const buildScaleFilterForLongestEdge = (maxEdge) =>
+  `scale=w='if(gt(iw\\,ih)\\,${maxEdge}\\,-2)':h='if(gt(iw\\,ih)\\,-2\\,${maxEdge})'`;
+
 const transcodeVariantToHls = async ({
   inputPath,
   outputPlaylistPath,
@@ -339,6 +343,8 @@ const processAndUploadVideoVariants = async ({
       masterUrl: uploadedMaster.url,
       masterKey: uploadedMaster.key,
       hlsKeys: uploadedHlsKeys,
+      sourceWidth: probe.width,
+      sourceHeight: probe.height,
       maxSourceHeight: probe.height,
       durationSeconds: probe.durationSeconds,
     };
@@ -390,10 +396,22 @@ const extractAndUploadThumbnailFromVideo = async ({ localInputPath, title, serve
       if (useLogo) {
         thumbArgs.push("-i", logoPath);
       }
-      const filter = buildThumbnailWatermarkFilter({ watermark, hasLogoInput: Boolean(useLogo) });
+      const filter = buildThumbnailWatermarkFilter({
+        watermark,
+        hasLogoInput: Boolean(useLogo),
+        sourceHeight: probe.height,
+      });
       thumbArgs.push("-filter_complex", filter, "-map", "[vout]", "-frames:v", "1", "-q:v", "2", outputPath);
     } else {
-      thumbArgs.push("-frames:v", "1", "-q:v", "2", "-vf", "scale=1280:-2", outputPath);
+      thumbArgs.push(
+        "-frames:v",
+        "1",
+        "-q:v",
+        "2",
+        "-vf",
+        buildScaleFilterForLongestEdge(1280),
+        outputPath
+      );
     }
 
     await execFileAsync(ffmpegPath, thumbArgs);
@@ -426,13 +444,18 @@ const extractAndUploadPreviewClipFromVideo = async ({
   title,
   serverConfig,
   durationSeconds = 0,
+  sourceWidth = 0,
+  sourceHeight = 0,
 }) => {
   const inputSource = localInputPath || remoteInputUrl;
   if (!inputSource) {
     throw new Error("Video input is required");
   }
 
-  const probe = durationSeconds > 0 ? { durationSeconds } : await probeVideo(inputSource);
+  const probe =
+    durationSeconds > 0 && sourceWidth > 0 && sourceHeight > 0
+      ? { durationSeconds, width: sourceWidth, height: sourceHeight }
+      : await probeVideo(inputSource);
   const duration = probe.durationSeconds > 0 ? probe.durationSeconds : 0;
   const clipLength = Math.min(6, duration > 0 ? duration : 6);
   const seekSeconds =
@@ -452,7 +475,7 @@ const extractAndUploadPreviewClipFromVideo = async ({
       String(clipLength),
       "-an",
       "-vf",
-      "scale=-2:360",
+      buildScaleFilterForLongestEdge(360),
       "-c:v",
       "libx264",
       "-preset",

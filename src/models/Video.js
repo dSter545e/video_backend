@@ -20,6 +20,8 @@ const videoSchema = new mongoose.Schema(
     sourceVideoKey: { type: String, default: "" },
     hlsKeys: [{ type: String }],
     durationSeconds: { type: Number, default: 0 },
+    sourceWidth: { type: Number, default: 0 },
+    sourceHeight: { type: Number, default: 0 },
     maxSourceHeight: { type: Number, default: 0 },
     qualityVariants: [
       {

@@ -67,6 +67,8 @@ const startVideoProcessingJob = ({ videoId, localInputPath, originalName, title,
         sourceVideoKey: processed.masterKey || "",
         hlsKeys: processed.hlsKeys || [],
         qualityVariants: processed.variants,
+        sourceWidth: processed.sourceWidth,
+        sourceHeight: processed.sourceHeight,
         maxSourceHeight: processed.maxSourceHeight,
         durationSeconds: processed.durationSeconds,
         processingStatus: nextStatus,
@@ -94,6 +96,8 @@ const startVideoProcessingJob = ({ videoId, localInputPath, originalName, title,
           title,
           serverConfig,
           durationSeconds: processed.durationSeconds,
+          sourceWidth: processed.sourceWidth,
+          sourceHeight: processed.sourceHeight,
         });
         if (autoPreview?.url) {
           updateFields.previewUrl = autoPreview.url;

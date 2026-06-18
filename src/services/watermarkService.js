@@ -141,8 +141,9 @@ const buildLogoWatermarkFilter = ({ targetHeight, watermark }) => {
   return `[0:v]scale=-2:${targetHeight}[base];[1:v]scale=-2:${logoHeight},format=rgba,colorchannelmixer=aa=${alpha}[wm];[base][wm]overlay=${margin}:H-h-${margin}[vout]`;
 };
 
-const buildThumbnailWatermarkFilter = ({ watermark, hasLogoInput }) => {
-  const targetHeight = 720;
+const buildThumbnailWatermarkFilter = ({ watermark, hasLogoInput, sourceHeight = 0 }) => {
+  const cappedHeight = sourceHeight > 0 ? Math.min(720, sourceHeight) : 720;
+  const targetHeight = cappedHeight;
   if (watermark.mode === "logo" && hasLogoInput) {
     return buildLogoWatermarkFilter({ targetHeight, watermark });
   }
