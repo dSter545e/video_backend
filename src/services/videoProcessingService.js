@@ -4,7 +4,7 @@ const os = require("os");
 const { execFile } = require("child_process");
 const ffmpegPath = require("ffmpeg-static");
 const ffprobePath = require("ffprobe-static").path;
-const { uploadFileToR2, deleteFileFromR2 } = require("../utils/r2Client");
+const { uploadFileToR2, deleteFileFromR2, downloadFileFromR2, listFilesFromR2, extractObjectKeyFromUrl } = require("../utils/r2Client");
 const {
   getWatermarkSettings,
   isWatermarkActive,
@@ -23,16 +23,98 @@ const BANDWIDTH_BY_HEIGHT = {
   1080: 5000000,
 };
 
+const formatFfmpegError = (stderr, fallback) => {
+  const skipPrefixes = ["ffmpeg version", "built with", "configuration:", "libav", "libsw", "libpostproc"];
+  const lines = String(stderr || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !skipPrefixes.some((prefix) => line.startsWith(prefix)));
+
+  const message = lines.slice(-6).join(" ").trim();
+  return message || fallback || "ffmpeg failed";
+};
+
 const execFileAsync = (command, args) =>
   new Promise((resolve, reject) => {
     execFile(command, args, (error, stdout, stderr) => {
       if (error) {
-        reject(new Error(stderr || error.message));
+        reject(new Error(formatFfmpegError(stderr, error.message)));
         return;
       }
       resolve(stdout);
     });
   });
+
+const getObjectPrefixFromKey = (objectKey) => {
+  const normalized = String(objectKey || "").replace(/^\/+/, "");
+  if (!normalized.includes("/")) return "";
+  return normalized.slice(0, normalized.lastIndexOf("/") + 1);
+};
+
+const downloadR2PrefixToLocalDir = async ({ prefix, targetDir, serverConfig }) => {
+  const items = await listFilesFromR2(prefix, serverConfig);
+  if (!items.length) {
+    throw new Error(`No storage files found under ${prefix}`);
+  }
+
+  fs.mkdirSync(targetDir, { recursive: true });
+  for (const item of items) {
+    if (!item.key) continue;
+    const relativePath = item.key.startsWith(prefix) ? item.key.slice(prefix.length) : path.basename(item.key);
+    const localPath = path.join(targetDir, relativePath);
+    fs.mkdirSync(path.dirname(localPath), { recursive: true });
+    const buffer = await downloadFileFromR2(item.key, serverConfig);
+    fs.writeFileSync(localPath, buffer);
+  }
+
+  return items;
+};
+
+const resolveHlsPlaylistKey = (video) => {
+  const variants = [...(video.qualityVariants || [])]
+    .filter((variant) => variant?.key || variant?.url)
+    .sort((a, b) => (a.height || 0) - (b.height || 0));
+
+  for (const variant of variants) {
+    const objectKey = variant.key || extractObjectKeyFromUrl(variant.url);
+    if (objectKey && objectKey.endsWith(".m3u8")) {
+      return objectKey;
+    }
+  }
+
+  if (typeof video.videoUrl === "string" && video.videoUrl.includes(".m3u8")) {
+    return extractObjectKeyFromUrl(video.videoUrl);
+  }
+
+  if (Array.isArray(video.hlsKeys)) {
+    const variantPlaylist = video.hlsKeys.find((key) => /\/\d+p\.m3u8$/i.test(String(key)));
+    if (variantPlaylist) return variantPlaylist;
+    const masterPlaylist = video.hlsKeys.find((key) => String(key).endsWith("master.m3u8"));
+    if (masterPlaylist) return masterPlaylist;
+  }
+
+  return "";
+};
+
+const prepareLocalVideoInputForPreview = async ({ video, serverConfig }) => {
+  const objectKey = resolveHlsPlaylistKey(video);
+  if (!objectKey) {
+    throw new Error("No HLS playlist key found for preview generation");
+  }
+
+  const prefix = getObjectPrefixFromKey(objectKey);
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ott-hls-input-"));
+  await downloadR2PrefixToLocalDir({ prefix, targetDir: tempDir, serverConfig });
+
+  const localPlaylist = path.join(tempDir, path.basename(objectKey));
+  if (!fs.existsSync(localPlaylist)) {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+    throw new Error(`Downloaded playlist missing: ${path.basename(objectKey)}`);
+  }
+
+  return { localInputPath: localPlaylist, cleanupDir: tempDir };
+};
 
 const probeVideo = async (inputPath) => {
   const output = await execFileAsync(ffprobePath, [
@@ -354,10 +436,10 @@ const extractAndUploadPreviewClipFromVideo = async ({
   try {
     await execFileAsync(ffmpegPath, [
       "-y",
-      "-ss",
-      String(seekSeconds),
       "-i",
       inputSource,
+      "-ss",
+      String(seekSeconds),
       "-t",
       String(clipLength),
       "-an",
@@ -397,5 +479,6 @@ module.exports = {
   processAndUploadVideoVariants,
   extractAndUploadThumbnailFromVideo,
   extractAndUploadPreviewClipFromVideo,
+  prepareLocalVideoInputForPreview,
   probeVideo,
 };

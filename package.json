@@ -12,6 +12,7 @@
     "seed:admin": "node scripts/seedAdmin.js",
     "configure:r2-cors": "node scripts/configureR2Cors.js",
     "backfill:previews": "node scripts/backfillVideoPreviews.js",
+    "backfill:previews:all": "node scripts/backfillVideoPreviews.js --regenerate",
     "test": "echo \"No tests configured\""
   },
   "devDependencies": {
