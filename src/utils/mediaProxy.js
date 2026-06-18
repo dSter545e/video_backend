@@ -30,9 +30,12 @@ const isR2MediaUrl = (url) => {
 };
 
 const rewriteStreamUrl = (url, mediaBaseUrl) => {
-  if (!isR2MediaUrl(url)) return url;
-  const objectKey = extractObjectKeyFromUrl(url);
-  if (!objectKey) return url;
+  if (!url || typeof url !== "string") return url;
+  const trimmed = url.trim();
+  if (!trimmed || trimmed === "about:blank") return trimmed;
+  if (!isR2MediaUrl(trimmed)) return trimmed;
+  const objectKey = extractObjectKeyFromUrl(trimmed);
+  if (!objectKey) return trimmed;
   return buildMediaProxyUrl(mediaBaseUrl, objectKey);
 };
 

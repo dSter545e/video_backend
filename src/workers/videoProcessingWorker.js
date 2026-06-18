@@ -107,10 +107,13 @@ const startVideoProcessingJob = ({ videoId, localInputPath, originalName, title,
         $set: updateFields,
       });
     } catch (error) {
+      console.error(`[video-processing] ${videoId} failed:`, error.message);
       if (error.message !== "VIDEO_PROCESS_CANCELLED") {
         await Video.findByIdAndUpdate(videoId, {
           $set: {
-            processingStatus: "private",
+            processingStatus: "failed",
+            healthStatus: "offline",
+            healthMessage: String(error.message || "Video processing failed").slice(0, 500),
           },
         });
       }

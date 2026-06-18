@@ -170,7 +170,7 @@ const transcodeVariantToHls = async ({
     });
     args.push("-filter_complex", filter, "-map", "[vout]", "-map", "0:a?");
   } else {
-    args.push("-vf", `scale=-2:${targetHeight}`);
+    args.push("-vf", `scale=-2:${targetHeight}`, "-map", "0:v:0", "-map", "0:a?");
   }
 
   args.push(
@@ -223,7 +223,11 @@ const processAndUploadVideoVariants = async ({
   const watermark = await getWatermarkSettings();
   let logoPath = null;
   if (isWatermarkActive(watermark) && watermark.mode === "logo") {
-    logoPath = await prepareWatermarkLogoFile({ watermark, serverConfig });
+    try {
+      logoPath = await prepareWatermarkLogoFile({ watermark, serverConfig });
+    } catch (error) {
+      console.warn("[video-processing] Watermark logo unavailable, continuing without logo:", error.message);
+    }
   }
 
   const baseName = `${Date.now()}-${(title || originalName || "video").replace(/[^a-zA-Z0-9-_]/g, "-")}`;
@@ -368,7 +372,11 @@ const extractAndUploadThumbnailFromVideo = async ({ localInputPath, title, serve
   const useWatermark = isWatermarkActive(watermark);
   let logoPath = null;
   if (useWatermark && watermark.mode === "logo") {
-    logoPath = await prepareWatermarkLogoFile({ watermark, serverConfig });
+    try {
+      logoPath = await prepareWatermarkLogoFile({ watermark, serverConfig });
+    } catch (error) {
+      console.warn("[video-processing] Thumbnail watermark logo unavailable:", error.message);
+    }
   }
 
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ott-thumb-"));

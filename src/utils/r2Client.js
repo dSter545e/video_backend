@@ -1,6 +1,11 @@
 const { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand, ListObjectsV2Command, PutBucketCorsCommand } = require("@aws-sdk/client-s3");
+const { NodeHttpHandler } = require("@smithy/node-http-handler");
 const fs = require("fs");
 const { Transform } = require("stream");
+
+const SMALL_FILE_BUFFER_THRESHOLD_BYTES = Number(process.env.R2_BUFFER_UPLOAD_MAX_MB || 100) * 1024 * 1024;
+const R2_UPLOAD_TIMEOUT_MS = Number(process.env.R2_UPLOAD_TIMEOUT_MS || 120000);
+const R2_UPLOAD_MAX_ATTEMPTS = Number(process.env.R2_UPLOAD_MAX_ATTEMPTS || 3);
 
 const normalizeServerConfig = (serverConfig) => ({
   accountId: serverConfig.accountId,
@@ -34,6 +39,9 @@ const formatR2Error = (error) => {
   if (message.includes("UnknownError") || name === "Unknown") {
     return "Could not connect to R2. Verify Account ID, access keys, bucket name, and that the bucket exists.";
   }
+  if (message.includes("ECONNRESET") || message.includes("non-retryable streaming")) {
+    return "Storage upload connection was interrupted. The server will retry automatically; if this persists, check your network or R2 credentials.";
+  }
   return message;
 };
 
@@ -65,39 +73,46 @@ const createR2Client = async (serverConfig = null) => {
     region: "auto",
     endpoint: `https://${accountId}.r2.cloudflarestorage.com`,
     credentials: { accessKeyId, secretAccessKey },
+    maxAttempts: R2_UPLOAD_MAX_ATTEMPTS,
+    requestHandler: new NodeHttpHandler({
+      connectionTimeout: 15000,
+      requestTimeout: R2_UPLOAD_TIMEOUT_MS,
+    }),
   });
 };
 
-const sendWithTimeout = async (client, command, timeoutMs) => {
-  const abortController = new AbortController();
-  const timer = setTimeout(() => abortController.abort(), timeoutMs);
-  try {
-    return await client.send(command, { abortSignal: abortController.signal });
-  } finally {
-    clearTimeout(timer);
-  }
+const isTransientUploadError = (error) => {
+  const code = String(error?.code || error?.errno || "");
+  const message = String(error?.message || "");
+  return (
+    code === "ECONNRESET" ||
+    code === "ECONNREFUSED" ||
+    code === "ETIMEDOUT" ||
+    code === "EPIPE" ||
+    code === "ENOTFOUND" ||
+    error?.name === "AbortError" ||
+    message.includes("ECONNRESET") ||
+    message.includes("non-retryable streaming") ||
+    message.includes("socket hang up")
+  );
 };
 
-const getPublicFileUrl = ({ bucket, objectKey, publicBaseUrl }) => {
-  const normalizedKey = String(objectKey || "").replace(/^\/+/, "");
-  const fallbackR2Dev = `https://${bucket}.r2.dev/${normalizedKey}`;
-
-  if (!publicBaseUrl) {
-    return fallbackR2Dev;
-  }
-
-  const cleanedBase = publicBaseUrl.replace(/\/$/, "");
-  if (cleanedBase.includes(".r2.cloudflarestorage.com")) {
-    return fallbackR2Dev;
-  }
-
-  return `${cleanedBase}/${normalizedKey}`;
+const putObjectBuffered = async (client, { bucket, objectKey, localFilePath, contentType, totalBytes, timeoutMs }) => {
+  const buffer = fs.readFileSync(localFilePath);
+  await sendWithTimeout(
+    client,
+    new PutObjectCommand({
+      Bucket: bucket,
+      Key: objectKey,
+      Body: buffer,
+      ContentType: contentType,
+      ContentLength: totalBytes,
+    }),
+    timeoutMs
+  );
 };
 
-const uploadFileToR2 = async ({ localFilePath, objectKey, contentType, onProgress, preferBufferUpload = false, serverConfig = null }) => {
-  const client = await createR2Client(serverConfig);
-  const { bucket, publicBaseUrl } = await getR2Config(serverConfig);
-  const totalBytes = fs.statSync(localFilePath).size;
+const putObjectStream = async (client, { bucket, objectKey, localFilePath, contentType, totalBytes, onProgress, timeoutMs }) => {
   const startedAt = Date.now();
   let uploadedBytes = 0;
   let lastNotifiedBytes = 0;
@@ -130,67 +145,96 @@ const uploadFileToR2 = async ({ localFilePath, objectKey, contentType, onProgres
   });
 
   const body = source.pipe(progressStream);
-
-  if (preferBufferUpload) {
-    onProgress?.({
-      uploadedBytes: totalBytes,
-      totalBytes,
-      uploadedMB: Number((totalBytes / (1024 * 1024)).toFixed(2)),
-      totalMB: Number((totalBytes / (1024 * 1024)).toFixed(2)),
-      percent: 100,
-      elapsedSec: 0,
-      speedMBps: 0,
-      etaSec: 0,
-    });
-    const buffer = fs.readFileSync(localFilePath);
-    await sendWithTimeout(
-      client,
-      new PutObjectCommand({
-        Bucket: bucket,
-        Key: objectKey,
-        Body: buffer,
-        ContentType: contentType,
-        ContentLength: totalBytes,
-      }),
-      90000
-    );
-  } else {
-    const streamCommand = new PutObjectCommand({
+  await sendWithTimeout(
+    client,
+    new PutObjectCommand({
       Bucket: bucket,
       Key: objectKey,
       Body: body,
       ContentType: contentType,
       ContentLength: totalBytes,
-    });
+    }),
+    timeoutMs
+  );
+};
 
+const sendWithTimeout = async (client, command, timeoutMs) => {
+  const abortController = new AbortController();
+  const timer = setTimeout(() => abortController.abort(), timeoutMs);
+  try {
+    return await client.send(command, { abortSignal: abortController.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+const getPublicFileUrl = ({ bucket, objectKey, publicBaseUrl }) => {
+  const normalizedKey = String(objectKey || "").replace(/^\/+/, "");
+  const fallbackR2Dev = `https://${bucket}.r2.dev/${normalizedKey}`;
+
+  if (!publicBaseUrl) {
+    return fallbackR2Dev;
+  }
+
+  const cleanedBase = publicBaseUrl.replace(/\/$/, "");
+  if (cleanedBase.includes(".r2.cloudflarestorage.com")) {
+    return fallbackR2Dev;
+  }
+
+  return `${cleanedBase}/${normalizedKey}`;
+};
+
+const uploadFileToR2 = async ({ localFilePath, objectKey, contentType, onProgress, preferBufferUpload = false, serverConfig = null }) => {
+  const client = await createR2Client(serverConfig);
+  const { bucket, publicBaseUrl } = await getR2Config(serverConfig);
+  const totalBytes = fs.statSync(localFilePath).size;
+  const useBufferUpload = preferBufferUpload || totalBytes <= SMALL_FILE_BUFFER_THRESHOLD_BYTES;
+  const payload = { bucket, objectKey, localFilePath, contentType, totalBytes, onProgress, timeoutMs: R2_UPLOAD_TIMEOUT_MS };
+
+  let lastError = null;
+  for (let attempt = 1; attempt <= R2_UPLOAD_MAX_ATTEMPTS; attempt += 1) {
     try {
-      await sendWithTimeout(client, streamCommand, 45000);
+      if (useBufferUpload) {
+        onProgress?.({
+          uploadedBytes: totalBytes,
+          totalBytes,
+          uploadedMB: Number((totalBytes / (1024 * 1024)).toFixed(2)),
+          totalMB: Number((totalBytes / (1024 * 1024)).toFixed(2)),
+          percent: 100,
+          elapsedSec: 0,
+          speedMBps: 0,
+          etaSec: 0,
+        });
+        await putObjectBuffered(client, payload);
+      } else {
+        try {
+          await putObjectStream(client, payload);
+        } catch (streamError) {
+          if (totalBytes > 200 * 1024 * 1024) {
+            throw streamError;
+          }
+          console.warn("[R2] Stream upload failed, retrying with buffered upload", {
+            objectKey,
+            error: streamError.message,
+          });
+          await putObjectBuffered(client, payload);
+        }
+      }
+      lastError = null;
+      break;
     } catch (error) {
-      const isAbort = error?.name === "AbortError";
-      if (!isAbort) {
-        throw error;
+      lastError = error;
+      const canRetry = attempt < R2_UPLOAD_MAX_ATTEMPTS && isTransientUploadError(error);
+      if (!canRetry) {
+        throw new Error(formatR2Error(error));
       }
-
-      // Fallback for R2 ACK hang after 100% streamed upload.
-      if (totalBytes > 200 * 1024 * 1024) {
-        throw new Error("R2 upload timed out waiting for acknowledgement");
-      }
-
-      console.warn("[R2] Stream upload ACK timeout, retrying with buffered upload", { objectKey });
-      const buffer = fs.readFileSync(localFilePath);
-      await sendWithTimeout(
-        client,
-        new PutObjectCommand({
-          Bucket: bucket,
-          Key: objectKey,
-          Body: buffer,
-          ContentType: contentType,
-          ContentLength: totalBytes,
-        }),
-        90000
-      );
-      console.warn("[R2] Buffered retry succeeded", { objectKey });
+      console.warn(`[R2] Upload attempt ${attempt}/${R2_UPLOAD_MAX_ATTEMPTS} failed for ${objectKey}: ${error.message}`);
+      await new Promise((resolve) => setTimeout(resolve, attempt * 1500));
     }
+  }
+
+  if (lastError) {
+    throw new Error(formatR2Error(lastError));
   }
 
   const url = getPublicFileUrl({ bucket, objectKey, publicBaseUrl });

@@ -17,10 +17,16 @@ const DEFAULT_WATERMARK = {
 };
 
 const getDefaultFontPath = () => {
-  if (process.platform === "win32") {
-    return "C:/Windows/Fonts/arial.ttf";
-  }
-  return "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
+  const candidates =
+    process.platform === "win32"
+      ? ["C:/Windows/Fonts/arial.ttf", "C:/Windows/Fonts/segoeui.ttf"]
+      : [
+          "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+          "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+          "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        ];
+
+  return candidates.find((candidate) => fs.existsSync(candidate)) || "";
 };
 
 const escapeDrawtext = (text) =>
@@ -120,10 +126,11 @@ const buildTextWatermarkFilter = ({ targetHeight, watermark }) => {
   const margin = scaledMargin(watermark, targetHeight);
   const fontSize = Math.max(14, Math.round(targetHeight / 28));
   const alpha = watermark.opacity.toFixed(2);
-  const fontfile = escapeFilterPath(getDefaultFontPath());
   const text = escapeDrawtext(watermark.text);
+  const fontPath = getDefaultFontPath();
+  const fontArg = fontPath ? `fontfile='${escapeFilterPath(fontPath)}':` : "";
 
-  return `[0:v]scale=-2:${targetHeight},drawtext=fontfile='${fontfile}':text='${text}':fontsize=${fontSize}:fontcolor=white@${alpha}:borderw=2:bordercolor=black@0.5:x=${margin}:y=h-th-${margin}[vout]`;
+  return `[0:v]scale=-2:${targetHeight},drawtext=${fontArg}text='${text}':fontsize=${fontSize}:fontcolor=white@${alpha}:borderw=2:bordercolor=black@0.5:x=${margin}:y=h-th-${margin}[vout]`;
 };
 
 const buildLogoWatermarkFilter = ({ targetHeight, watermark }) => {
