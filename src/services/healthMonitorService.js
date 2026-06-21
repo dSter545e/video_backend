@@ -82,16 +82,29 @@ const resolveServerForVideo = async (video, serverMap) => {
   return null;
 };
 
+const updateVideoHealth = async (videoId, fields) => {
+  await Video.findByIdAndUpdate(videoId, {
+    $set: {
+      healthStatus: fields.healthStatus,
+      healthMessage: fields.healthMessage,
+      healthCheckedAt: fields.healthCheckedAt,
+    },
+  });
+};
+
 const checkVideoHealth = async (video, serverMap) => {
   const checkedAt = new Date();
   const processingStates = ["processing", "draft"];
+  const videoUrl = typeof video.videoUrl === "string" ? video.videoUrl.trim() : "";
 
-  if (processingStates.includes(video.processingStatus) || video.videoUrl === "about:blank") {
-    video.healthStatus = "processing";
-    video.healthMessage = "Video is still processing or not published";
-    video.healthCheckedAt = checkedAt;
-    await video.save();
-    return { status: "processing", offline: false };
+  if (!videoUrl || processingStates.includes(video.processingStatus) || videoUrl === "about:blank") {
+    const healthMessage = "Video is still processing or not published";
+    await updateVideoHealth(video._id, {
+      healthStatus: "processing",
+      healthMessage,
+      healthCheckedAt: checkedAt,
+    });
+    return { status: "processing", offline: false, message: healthMessage };
   }
 
   const objectKey = resolveVideoObjectKey(video);
@@ -102,26 +115,32 @@ const checkVideoHealth = async (video, serverMap) => {
   const serverConfig = server ? server.toObject() : null;
 
   if (!objectKey) {
-    video.healthStatus = "unknown";
-    video.healthMessage = "No media object key found";
-    video.healthCheckedAt = checkedAt;
-    await video.save();
-    return { status: "unknown", offline: false };
+    const healthMessage = "No media object key found";
+    await updateVideoHealth(video._id, {
+      healthStatus: "unknown",
+      healthMessage,
+      healthCheckedAt: checkedAt,
+    });
+    return { status: "unknown", offline: false, message: healthMessage };
   }
 
   try {
     await headObjectInR2(objectKey, serverConfig);
-    video.healthStatus = "online";
-    video.healthMessage = "Media file reachable in storage";
-    video.healthCheckedAt = checkedAt;
-    await video.save();
-    return { status: "online", offline: false };
+    const healthMessage = "Media file reachable in storage";
+    await updateVideoHealth(video._id, {
+      healthStatus: "online",
+      healthMessage,
+      healthCheckedAt: checkedAt,
+    });
+    return { status: "online", offline: false, message: healthMessage };
   } catch (error) {
-    video.healthStatus = "offline";
-    video.healthMessage = error.message || "Media not found in storage";
-    video.healthCheckedAt = checkedAt;
-    await video.save();
-    return { status: "offline", offline: true };
+    const healthMessage = error.message || "Media not found in storage";
+    await updateVideoHealth(video._id, {
+      healthStatus: "offline",
+      healthMessage,
+      healthCheckedAt: checkedAt,
+    });
+    return { status: "offline", offline: true, message: healthMessage };
   }
 };
 
@@ -150,25 +169,30 @@ const runHealthMonitor = async ({ initiatedBy = "system" } = {}) => {
   let checkedLast24h = 0;
 
   for (const video of videos) {
-    const result = await checkVideoHealth(video, serverMap);
+    try {
+      const result = await checkVideoHealth(video, serverMap);
 
-    const isRecent =
-      (video.createdAt && video.createdAt >= last24h) || (video.healthCheckedAt && video.healthCheckedAt >= last24h);
-    if (isRecent) checkedLast24h += 1;
+      const isRecent =
+        (video.createdAt && video.createdAt >= last24h) || (video.healthCheckedAt && video.healthCheckedAt >= last24h);
+      if (isRecent) checkedLast24h += 1;
 
-    if (result.status === "online") onlineCount += 1;
-    else if (result.status === "offline") {
-      offlineCount += 1;
-      offlineVideos.push({
-        videoId: video._id,
-        shortId: video.videoId || "",
-        title: video.title,
-        status: "offline",
-        message: video.healthMessage,
-        checkedAt: video.healthCheckedAt,
-      });
-    } else if (result.status === "processing") processingCount += 1;
-    else skippedCount += 1;
+      if (result.status === "online") onlineCount += 1;
+      else if (result.status === "offline") {
+        offlineCount += 1;
+        offlineVideos.push({
+          videoId: video._id,
+          shortId: video.videoId || "",
+          title: video.title,
+          status: "offline",
+          message: result.message || "Media not found in storage",
+          checkedAt: new Date(),
+        });
+      } else if (result.status === "processing") processingCount += 1;
+      else skippedCount += 1;
+    } catch (error) {
+      skippedCount += 1;
+      console.warn(`[HealthMonitor] Skipped video ${video._id}: ${error.message}`);
+    }
   }
 
   const storageOnline = storageResults.filter((item) => item.status === "online").length;

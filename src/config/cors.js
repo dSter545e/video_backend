@@ -24,14 +24,29 @@ const parseOriginsFromEnv = () => {
   );
 };
 
-const isOriginAllowed = (origin, allowedOrigins) => {
+/** Optional: allow any origin whose host ends with this suffix (e.g. .xhub4u.com). */
+const parseOriginSuffix = () => {
+  const raw = (process.env.CORS_ORIGIN_SUFFIX || "").trim().replace(/\/+$/, "");
+  if (!raw) return "";
+  return raw.startsWith(".") ? raw : `.${raw}`;
+};
+
+const isOriginAllowed = (origin, allowedOrigins, originSuffix) => {
   if (!origin) return true;
-  return allowedOrigins.includes(origin);
+  if (allowedOrigins.includes(origin)) return true;
+  if (!originSuffix) return false;
+  try {
+    const { hostname } = new URL(origin);
+    return hostname.endsWith(originSuffix) || hostname === originSuffix.slice(1);
+  } catch {
+    return false;
+  }
 };
 
 const createCorsMiddleware = () => {
   const cors = require("cors");
   const allowedOrigins = parseOriginsFromEnv();
+  const originSuffix = parseOriginSuffix();
   const allowAll = process.env.CORS_ALLOW_ALL === "true";
 
   if (allowAll) {
@@ -40,10 +55,13 @@ const createCorsMiddleware = () => {
   }
 
   console.log("[CORS] Allowed origins:", allowedOrigins.join(", "));
+  if (originSuffix) {
+    console.log("[CORS] Also allowing origins ending with:", originSuffix);
+  }
 
   return cors({
     origin(origin, callback) {
-      if (isOriginAllowed(origin, allowedOrigins)) {
+      if (isOriginAllowed(origin, allowedOrigins, originSuffix)) {
         callback(null, true);
       } else {
         console.warn(`[CORS] Blocked origin: ${origin}`);
@@ -53,10 +71,13 @@ const createCorsMiddleware = () => {
     credentials: false,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
+    maxAge: 86400,
   });
 };
 
 module.exports = {
   parseOriginsFromEnv,
+  parseOriginSuffix,
+  isOriginAllowed,
   createCorsMiddleware,
 };

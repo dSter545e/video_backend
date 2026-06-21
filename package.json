@@ -11,10 +11,6 @@
     "start": "node src/index.js",
     "seed:admin": "node scripts/seedAdmin.js",
     "configure:r2-cors": "node scripts/configureR2Cors.js",
-    "regenerate:media": "node scripts/regenerateVideoMedia.js",
-    "regenerate:media:all": "node scripts/regenerateVideoMedia.js",
-    "backfill:previews": "node scripts/backfillVideoPreviews.js",
-    "backfill:previews:all": "node scripts/backfillVideoPreviews.js --regenerate",
     "test": "echo \"No tests configured\""
   },
   "devDependencies": {

@@ -36,6 +36,25 @@ app.get("/api/health", (_req, res) => {
   res.json({ ok: true });
 });
 
+app.get("/api/health/upload", (req, res) => {
+  const { parseOriginsFromEnv, parseOriginSuffix, isOriginAllowed } = require("./config/cors");
+  const origin = typeof req.headers.origin === "string" ? req.headers.origin : "";
+  const allowedOrigins = parseOriginsFromEnv();
+  const originSuffix = parseOriginSuffix();
+  const maxFileMb = Number(process.env.UPLOAD_MAX_FILE_MB || 1024);
+  const requestTimeoutMs = Number(process.env.UPLOAD_REQUEST_TIMEOUT_MS || 0);
+
+  res.json({
+    ok: true,
+    maxFileMb,
+    requestTimeoutMs,
+    corsAllowed: isOriginAllowed(origin, allowedOrigins, originSuffix),
+    requestOrigin: origin || null,
+    allowedOriginCount: allowedOrigins.length,
+    originSuffix: originSuffix || null,
+  });
+});
+
 app.use("/api/auth", authRoutes);
 app.use("/api/user-auth", userAuthRoutes);
 app.use("/api/dashboard", dashboardRoutes);
