@@ -4,7 +4,7 @@ const os = require("os");
 const { execFile } = require("child_process");
 const ffmpegPath = require("ffmpeg-static");
 const ffprobePath = require("ffprobe-static").path;
-const { uploadFileToR2, deleteFileFromR2, downloadFileFromR2, listFilesFromR2, extractObjectKeyFromUrl } = require("../utils/r2Client");
+const { uploadFileToR2, deleteFileFromR2 } = require("../utils/r2Client");
 const {
   getWatermarkSettings,
   isWatermarkActive,
@@ -46,76 +46,6 @@ const execFileAsync = (command, args) =>
     });
   });
 
-const getObjectPrefixFromKey = (objectKey) => {
-  const normalized = String(objectKey || "").replace(/^\/+/, "");
-  if (!normalized.includes("/")) return "";
-  return normalized.slice(0, normalized.lastIndexOf("/") + 1);
-};
-
-const downloadR2PrefixToLocalDir = async ({ prefix, targetDir, serverConfig }) => {
-  const items = await listFilesFromR2(prefix, serverConfig);
-  if (!items.length) {
-    throw new Error(`No storage files found under ${prefix}`);
-  }
-
-  fs.mkdirSync(targetDir, { recursive: true });
-  for (const item of items) {
-    if (!item.key) continue;
-    const relativePath = item.key.startsWith(prefix) ? item.key.slice(prefix.length) : path.basename(item.key);
-    const localPath = path.join(targetDir, relativePath);
-    fs.mkdirSync(path.dirname(localPath), { recursive: true });
-    const buffer = await downloadFileFromR2(item.key, serverConfig);
-    fs.writeFileSync(localPath, buffer);
-  }
-
-  return items;
-};
-
-const resolveHlsPlaylistKey = (video) => {
-  const variants = [...(video.qualityVariants || [])]
-    .filter((variant) => variant?.key || variant?.url)
-    .sort((a, b) => (a.height || 0) - (b.height || 0));
-
-  for (const variant of variants) {
-    const objectKey = variant.key || extractObjectKeyFromUrl(variant.url);
-    if (objectKey && objectKey.endsWith(".m3u8")) {
-      return objectKey;
-    }
-  }
-
-  if (typeof video.videoUrl === "string" && video.videoUrl.includes(".m3u8")) {
-    return extractObjectKeyFromUrl(video.videoUrl);
-  }
-
-  if (Array.isArray(video.hlsKeys)) {
-    const variantPlaylist = video.hlsKeys.find((key) => /\/\d+p\.m3u8$/i.test(String(key)));
-    if (variantPlaylist) return variantPlaylist;
-    const masterPlaylist = video.hlsKeys.find((key) => String(key).endsWith("master.m3u8"));
-    if (masterPlaylist) return masterPlaylist;
-  }
-
-  return "";
-};
-
-const prepareLocalVideoInputForPreview = async ({ video, serverConfig }) => {
-  const objectKey = resolveHlsPlaylistKey(video);
-  if (!objectKey) {
-    throw new Error("No HLS playlist key found for preview generation");
-  }
-
-  const prefix = getObjectPrefixFromKey(objectKey);
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ott-hls-input-"));
-  await downloadR2PrefixToLocalDir({ prefix, targetDir: tempDir, serverConfig });
-
-  const localPlaylist = path.join(tempDir, path.basename(objectKey));
-  if (!fs.existsSync(localPlaylist)) {
-    fs.rmSync(tempDir, { recursive: true, force: true });
-    throw new Error(`Downloaded playlist missing: ${path.basename(objectKey)}`);
-  }
-
-  return { localInputPath: localPlaylist, cleanupDir: tempDir };
-};
-
 const probeVideo = async (inputPath) => {
   const output = await execFileAsync(ffprobePath, [
     "-v",
@@ -150,6 +80,49 @@ const getTargetHeights = (sourceHeight) => {
 /** Scale down so the longest edge is at most maxEdge; never pad or crop. */
 const buildScaleFilterForLongestEdge = (maxEdge) =>
   `scale=w='if(gt(iw\\,ih)\\,${maxEdge}\\,-2)':h='if(gt(iw\\,ih)\\,-2\\,${maxEdge})'`;
+
+const PREVIEW_SEGMENT_SECONDS = 5;
+const PREVIEW_MIN_MULTI_SEGMENT_DURATION = 15;
+const PREVIEW_LONG_VIDEO_SECONDS = 120;
+
+const buildPreviewSegments = (duration) => {
+  if (!Number.isFinite(duration) || duration <= 0) {
+    return [{ start: 0, end: PREVIEW_SEGMENT_SECONDS }];
+  }
+
+  if (duration < PREVIEW_MIN_MULTI_SEGMENT_DURATION) {
+    return [{ start: 0, end: duration }];
+  }
+
+  const midStart = Math.max(0, duration / 2 - PREVIEW_SEGMENT_SECONDS / 2);
+  const lastStart =
+    duration >= PREVIEW_LONG_VIDEO_SECONDS
+      ? Math.max(0, duration - 60)
+      : Math.max(0, duration - PREVIEW_SEGMENT_SECONDS);
+
+  return [
+    { start: 0, end: Math.min(PREVIEW_SEGMENT_SECONDS, duration) },
+    { start: midStart, end: Math.min(midStart + PREVIEW_SEGMENT_SECONDS, duration) },
+    { start: lastStart, end: Math.min(lastStart + PREVIEW_SEGMENT_SECONDS, duration) },
+  ].filter((segment) => segment.end > segment.start);
+};
+
+const buildPreviewFilterComplex = (segments) => {
+  const scaleFilter = buildScaleFilterForLongestEdge(360);
+
+  if (segments.length === 1) {
+    const { start, end } = segments[0];
+    return `[0:v]trim=start=${start}:end=${end},setpts=PTS-STARTPTS,${scaleFilter}[vout]`;
+  }
+
+  const trimParts = segments.map((segment, index) => {
+    const start = Number(segment.start.toFixed(3));
+    const end = Number(segment.end.toFixed(3));
+    return `[0:v]trim=start=${start}:end=${end},setpts=PTS-STARTPTS[v${index}]`;
+  });
+  const concatInputs = segments.map((_, index) => `[v${index}]`).join("");
+  return `${trimParts.join(";")};${concatInputs}concat=n=${segments.length}:v=1:a=0,${scaleFilter}[vout]`;
+};
 
 const transcodeVariantToHls = async ({
   inputPath,
@@ -368,11 +341,34 @@ const processAndUploadVideoVariants = async ({
   }
 };
 
-const extractAndUploadThumbnailFromVideo = async ({ localInputPath, title, serverConfig }) => {
-  const probe = await probeVideo(localInputPath);
-  const duration = probe.durationSeconds > 0 ? probe.durationSeconds : 0;
-  const seekSeconds =
-    duration > 12 ? Math.min(8, Math.max(2, duration * 0.15)) : duration > 2 ? 1 : 0;
+const THUMBNAIL_SHORT_VIDEO_THRESHOLD_SECONDS = 60;
+
+const resolveDefaultThumbnailSeek = (durationSeconds) => {
+  if (durationSeconds >= 30 && durationSeconds < THUMBNAIL_SHORT_VIDEO_THRESHOLD_SECONDS) {
+    return 30;
+  }
+  if (durationSeconds > 12) return Math.min(8, Math.max(2, durationSeconds * 0.15));
+  if (durationSeconds > 2) return 1;
+  return 0;
+};
+
+const extractThumbnailFrameToFile = async ({
+  localInputPath,
+  seekSeconds,
+  outputPath,
+  sourceHeight = 0,
+  durationSeconds = 0,
+  serverConfig = null,
+}) => {
+  let resolvedHeight = sourceHeight;
+  let duration = durationSeconds;
+  if (!resolvedHeight || !duration) {
+    const probe = await probeVideo(localInputPath);
+    resolvedHeight = resolvedHeight || probe.height || 0;
+    duration = duration || probe.durationSeconds || 0;
+  }
+  const safeSeek =
+    duration > 0 ? Math.max(0, Math.min(seekSeconds, Math.max(0, duration - 0.05))) : Math.max(0, seekSeconds);
 
   const watermark = await getWatermarkSettings();
   const useWatermark = isWatermarkActive(watermark);
@@ -385,43 +381,66 @@ const extractAndUploadThumbnailFromVideo = async ({ localInputPath, title, serve
     }
   }
 
+  const thumbArgs = ["-y", "-ss", String(safeSeek), "-i", localInputPath];
+  const useLogo = useWatermark && watermark.mode === "logo" && logoPath;
+
+  if (useWatermark) {
+    if (useLogo) {
+      thumbArgs.push("-i", logoPath);
+    }
+    const filter = buildThumbnailWatermarkFilter({
+      watermark,
+      hasLogoInput: Boolean(useLogo),
+      sourceHeight: resolvedHeight,
+    });
+    thumbArgs.push("-filter_complex", filter, "-map", "[vout]", "-frames:v", "1", "-q:v", "2", outputPath);
+  } else {
+    thumbArgs.push("-frames:v", "1", "-q:v", "2", "-vf", buildScaleFilterForLongestEdge(1280), outputPath);
+  }
+
+  try {
+    await execFileAsync(ffmpegPath, thumbArgs);
+    if (!fs.existsSync(outputPath)) {
+      throw new Error("Thumbnail frame was not created");
+    }
+  } finally {
+    if (logoPath) {
+      fs.rmSync(logoPath, { force: true });
+    }
+  }
+};
+
+const extractAndUploadThumbnailFromVideo = async ({
+  localInputPath,
+  title,
+  serverConfig,
+  seekSeconds,
+  objectKeyPrefix = "",
+}) => {
+  const probe = await probeVideo(localInputPath);
+  const duration = probe.durationSeconds > 0 ? probe.durationSeconds : 0;
+  const resolvedSeek =
+    typeof seekSeconds === "number" && Number.isFinite(seekSeconds)
+      ? seekSeconds
+      : resolveDefaultThumbnailSeek(duration);
+
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ott-thumb-"));
   const outputPath = path.join(tempDir, "thumb.jpg");
 
   try {
-    const thumbArgs = ["-y", "-ss", String(seekSeconds), "-i", localInputPath];
-    const useLogo = useWatermark && watermark.mode === "logo" && logoPath;
-
-    if (useWatermark) {
-      if (useLogo) {
-        thumbArgs.push("-i", logoPath);
-      }
-      const filter = buildThumbnailWatermarkFilter({
-        watermark,
-        hasLogoInput: Boolean(useLogo),
-        sourceHeight: probe.height,
-      });
-      thumbArgs.push("-filter_complex", filter, "-map", "[vout]", "-frames:v", "1", "-q:v", "2", outputPath);
-    } else {
-      thumbArgs.push(
-        "-frames:v",
-        "1",
-        "-q:v",
-        "2",
-        "-vf",
-        buildScaleFilterForLongestEdge(1280),
-        outputPath
-      );
-    }
-
-    await execFileAsync(ffmpegPath, thumbArgs);
-
-    if (!fs.existsSync(outputPath)) {
-      throw new Error("Thumbnail frame was not created");
-    }
+    await extractThumbnailFrameToFile({
+      localInputPath,
+      seekSeconds: resolvedSeek,
+      outputPath,
+      sourceHeight: probe.height,
+      durationSeconds: probe.durationSeconds,
+      serverConfig,
+    });
 
     const safeName = (title || "video").replace(/[^a-zA-Z0-9-_]/g, "-");
-    const objectKey = `images/thumbnails/auto-${Date.now()}-${safeName}.jpg`;
+    const objectKey = objectKeyPrefix
+      ? `${objectKeyPrefix.replace(/\/$/, "")}/${Math.round(resolvedSeek)}s-${safeName}.jpg`
+      : `images/thumbnails/auto-${Date.now()}-${Math.round(resolvedSeek)}s-${safeName}.jpg`;
     const uploaded = await uploadFileToR2({
       localFilePath: outputPath,
       objectKey,
@@ -429,11 +448,8 @@ const extractAndUploadThumbnailFromVideo = async ({ localInputPath, title, serve
       serverConfig,
     });
 
-    return uploaded;
+    return { ...uploaded, seekSeconds: resolvedSeek };
   } finally {
-    if (logoPath) {
-      fs.rmSync(logoPath, { force: true });
-    }
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 };
@@ -457,9 +473,7 @@ const extractAndUploadPreviewClipFromVideo = async ({
       ? { durationSeconds, width: sourceWidth, height: sourceHeight }
       : await probeVideo(inputSource);
   const duration = probe.durationSeconds > 0 ? probe.durationSeconds : 0;
-  const clipLength = Math.min(6, duration > 0 ? duration : 6);
-  const seekSeconds =
-    duration > 12 ? Math.min(8, Math.max(2, duration * 0.15)) : duration > 2 ? 1 : 0;
+  const segments = buildPreviewSegments(duration);
 
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ott-preview-"));
   const outputPath = path.join(tempDir, "preview.mp4");
@@ -469,13 +483,11 @@ const extractAndUploadPreviewClipFromVideo = async ({
       "-y",
       "-i",
       inputSource,
-      "-ss",
-      String(seekSeconds),
-      "-t",
-      String(clipLength),
+      "-filter_complex",
+      buildPreviewFilterComplex(segments),
+      "-map",
+      "[vout]",
       "-an",
-      "-vf",
-      buildScaleFilterForLongestEdge(360),
       "-c:v",
       "libx264",
       "-preset",
@@ -510,6 +522,6 @@ module.exports = {
   processAndUploadVideoVariants,
   extractAndUploadThumbnailFromVideo,
   extractAndUploadPreviewClipFromVideo,
-  prepareLocalVideoInputForPreview,
   probeVideo,
+  buildPreviewSegments,
 };

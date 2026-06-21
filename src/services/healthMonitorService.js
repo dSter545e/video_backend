@@ -12,13 +12,16 @@ const getIntervalMs = () => {
 };
 
 const resolveVideoObjectKey = (video) => {
-  if (video.sourceVideoKey) return video.sourceVideoKey;
   const fromUrl = extractObjectKeyFromUrl(video.videoUrl);
-  if (fromUrl) return fromUrl;
+  if (fromUrl && fromUrl.endsWith(".m3u8")) return fromUrl;
   if (Array.isArray(video.hlsKeys) && video.hlsKeys.length) {
     const masterKey = video.hlsKeys.find((key) => String(key).endsWith("master.m3u8"));
-    return masterKey || video.hlsKeys[0];
+    if (masterKey) return masterKey;
   }
+  if (video.sourceVideoKey && String(video.sourceVideoKey).endsWith(".m3u8")) {
+    return video.sourceVideoKey;
+  }
+  if (fromUrl) return fromUrl;
   if (Array.isArray(video.qualityVariants) && video.qualityVariants.length) {
     const variantKey = video.qualityVariants.find((item) => item?.key)?.key;
     if (variantKey) return variantKey;

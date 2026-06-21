@@ -7,8 +7,17 @@ const VideoReaction = require("../models/VideoReaction");
 const VideoComment = require("../models/VideoComment");
 const VideoTag = require("../models/VideoTag");
 const VisitorEvent = require("../models/VisitorEvent");
-const { uploadFileToR2, deleteFileFromR2, extractObjectKeyFromUrl } = require("../utils/r2Client");
-const { startVideoProcessingJob, cancelVideoProcessingJob } = require("../workers/videoProcessingWorker");
+const {
+  uploadFileToR2,
+  deleteFileFromR2,
+  deleteFilesByPrefix,
+  extractObjectKeyFromUrl,
+  extractStorageKeyFromReference,
+} = require("../utils/r2Client");
+const {
+  startVideoProcessingJob,
+  cancelVideoProcessingJob,
+} = require("../workers/videoProcessingWorker");
 const { buildUniqueSlug } = require("../utils/slug");
 const { withMediaProxyUrls, withMediaProxyUrlsList } = require("../utils/mediaProxy");
 
@@ -45,6 +54,73 @@ const resolveDefaultStorageServer = async () => {
   const defaultServer = await StorageServer.findOne({ isDefault: true, isActive: true });
   if (defaultServer) return defaultServer;
   return StorageServer.findOne({ isActive: true }).sort({ createdAt: 1 });
+};
+
+const hasCustomThumbnail = (video) => {
+  const url = typeof video?.thumbnail === "string" ? video.thumbnail.trim() : "";
+  return Boolean(url && url !== "about:blank");
+};
+
+const collectProcessedMediaKeys = (video) => {
+  const keys = new Set();
+  const sourceVideoKey = video.sourceVideoKey || extractStorageKeyFromReference(video.videoUrl);
+
+  if (sourceVideoKey && !String(sourceVideoKey).startsWith("videos/sources/")) {
+    keys.add(sourceVideoKey);
+  }
+
+  const previewKey = video.previewKey || extractStorageKeyFromReference(video.previewUrl);
+  if (previewKey) keys.add(previewKey);
+
+  const thumbnailKey = video.thumbnailKey || extractStorageKeyFromReference(video.thumbnail);
+  if (thumbnailKey) keys.add(thumbnailKey);
+
+  if (Array.isArray(video.qualityVariants)) {
+    for (const variant of video.qualityVariants) {
+      const variantKey = variant?.key || extractStorageKeyFromReference(variant?.url);
+      if (variantKey) keys.add(variantKey);
+    }
+  }
+
+  if (Array.isArray(video.hlsKeys)) {
+    for (const key of video.hlsKeys) {
+      if (key) keys.add(key);
+    }
+  }
+
+  return Array.from(keys);
+};
+
+const collectProcessedMediaPrefixes = (video) => {
+  const prefixes = new Set();
+  for (const key of collectProcessedMediaKeys(video)) {
+    const normalized = String(key || "").replace(/^\/+/, "");
+    const hlsFolderMatch = normalized.match(/^(videos\/[^/]+\/)/);
+    if (hlsFolderMatch) {
+      prefixes.add(hlsFolderMatch[1]);
+    }
+  }
+  return Array.from(prefixes);
+};
+
+const deleteExistingProcessedMedia = async (video, serverConfig) => {
+  const keys = collectProcessedMediaKeys(video);
+  for (const key of keys) {
+    try {
+      await deleteFileFromR2(key, serverConfig);
+    } catch (_error) {
+      // ignore cleanup failure
+    }
+  }
+
+  const prefixes = collectProcessedMediaPrefixes(video);
+  for (const prefix of prefixes) {
+    try {
+      await deleteFilesByPrefix(prefix, serverConfig);
+    } catch (_error) {
+      // ignore cleanup failure
+    }
+  }
 };
 
 const normalizeTagName = (value = "") => value.trim().toLowerCase().replace(/\s+/g, " ");
@@ -738,6 +814,13 @@ const deleteVideo = async (req, res) => {
     } catch (error) {
     }
   }
+
+  try {
+    await deleteFilesByPrefix(`videos/sources/${deleted._id.toString()}/`, serverConfig);
+  } catch (_error) {
+    // ignore legacy source cleanup failure
+  }
+
   return res.status(204).send();
 };
 

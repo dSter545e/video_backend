@@ -1,7 +1,9 @@
 const { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand, ListObjectsV2Command, PutBucketCorsCommand } = require("@aws-sdk/client-s3");
 const { NodeHttpHandler } = require("@smithy/node-http-handler");
 const fs = require("fs");
+const path = require("path");
 const { Transform } = require("stream");
+const { pipeline } = require("stream/promises");
 
 const SMALL_FILE_BUFFER_THRESHOLD_BYTES = Number(process.env.R2_BUFFER_UPLOAD_MAX_MB || 100) * 1024 * 1024;
 const R2_UPLOAD_TIMEOUT_MS = Number(process.env.R2_UPLOAD_TIMEOUT_MS || 120000);
@@ -254,6 +256,24 @@ const deleteFileFromR2 = async (objectKey, serverConfig = null) => {
   );
 };
 
+const deleteFilesByPrefix = async (prefix = "", serverConfig = null) => {
+  const normalizedPrefix = String(prefix || "").replace(/^\/+/, "");
+  if (!normalizedPrefix) return 0;
+
+  const items = await listFilesFromR2(normalizedPrefix, serverConfig);
+  let deletedCount = 0;
+  for (const item of items) {
+    if (!item.key) continue;
+    try {
+      await deleteFileFromR2(item.key, serverConfig);
+      deletedCount += 1;
+    } catch (_error) {
+      // ignore cleanup failure
+    }
+  }
+  return deletedCount;
+};
+
 const streamToBuffer = async (stream) => {
   const chunks = [];
   for await (const chunk of stream) {
@@ -273,6 +293,24 @@ const downloadFileFromR2 = async (objectKey, serverConfig = null) => {
     })
   );
   return streamToBuffer(result.Body);
+};
+
+const downloadFileFromR2ToPath = async (objectKey, localFilePath, serverConfig = null) => {
+  if (!objectKey) throw new Error("objectKey is required");
+  if (!localFilePath) throw new Error("localFilePath is required");
+
+  const client = await createR2Client(serverConfig);
+  const { bucket } = await getR2Config(serverConfig);
+  const result = await client.send(
+    new GetObjectCommand({
+      Bucket: bucket,
+      Key: objectKey,
+    })
+  );
+
+  fs.mkdirSync(path.dirname(localFilePath), { recursive: true });
+  await pipeline(result.Body, fs.createWriteStream(localFilePath));
+  return localFilePath;
 };
 
 const listFilesFromR2 = async (prefix = "", serverConfig = null) => {
@@ -308,6 +346,35 @@ const extractObjectKeyFromUrl = (fileUrl) => {
   } catch (_error) {
     return "";
   }
+};
+
+const extractStorageKeyFromReference = (value) => {
+  if (!value || typeof value !== "string") return "";
+  const trimmed = value.trim();
+  if (!trimmed || trimmed === "about:blank") return "";
+
+  const proxyMatch = trimmed.match(/\/api\/media\/(.+)$/i);
+  if (proxyMatch) {
+    return proxyMatch[1]
+      .split("/")
+      .map((segment) => {
+        try {
+          return decodeURIComponent(segment);
+        } catch (_error) {
+          return segment;
+        }
+      })
+      .join("/")
+      .replace(/^\/+/, "");
+  }
+
+  const fromUrl = extractObjectKeyFromUrl(trimmed);
+  if (fromUrl.toLowerCase().startsWith("api/media/")) {
+    return fromUrl.slice("api/media/".length);
+  }
+  if (fromUrl) return fromUrl;
+
+  return trimmed.replace(/^\/+/, "");
 };
 
 const { parseOriginsFromEnv } = require("../config/cors");
@@ -384,9 +451,12 @@ const headObjectInR2 = async (objectKey, serverConfig = null) => {
 module.exports = {
   uploadFileToR2,
   deleteFileFromR2,
+  deleteFilesByPrefix,
   downloadFileFromR2,
+  downloadFileFromR2ToPath,
   listFilesFromR2,
   extractObjectKeyFromUrl,
+  extractStorageKeyFromReference,
   configureR2Cors,
   configureAllR2Cors,
   getDefaultCorsOrigins,

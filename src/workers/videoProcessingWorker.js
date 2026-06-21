@@ -13,7 +13,18 @@ const hasCustomThumbnail = (value) => {
 
 const activeJobs = new Map();
 
-const startVideoProcessingJob = ({ videoId, localInputPath, originalName, title, serverConfig }) => {
+const isVideoProcessingActive = (videoId) => activeJobs.has(String(videoId));
+
+const getActiveProcessingCount = () => activeJobs.size;
+
+const startVideoProcessingJob = ({
+  videoId,
+  localInputPath,
+  originalName,
+  title,
+  serverConfig,
+  cleanupDir = "",
+}) => {
   const jobState = { cancelled: false };
   activeJobs.set(videoId, jobState);
 
@@ -123,8 +134,18 @@ const startVideoProcessingJob = ({ videoId, localInputPath, originalName, title,
       }
     } finally {
       activeJobs.delete(videoId);
-      if (localInputPath) {
-        fs.rmSync(localInputPath, { force: true });
+      if (cleanupDir) {
+        try {
+          fs.rmSync(cleanupDir, { recursive: true, force: true });
+        } catch (_cleanupError) {
+          // ignore cleanup failure
+        }
+      } else if (localInputPath) {
+        try {
+          fs.rmSync(localInputPath, { force: true });
+        } catch (_cleanupError) {
+          // ignore cleanup failure
+        }
       }
     }
   });
@@ -137,4 +158,9 @@ const cancelVideoProcessingJob = (videoId) => {
   }
 };
 
-module.exports = { startVideoProcessingJob, cancelVideoProcessingJob };
+module.exports = {
+  startVideoProcessingJob,
+  cancelVideoProcessingJob,
+  isVideoProcessingActive,
+  getActiveProcessingCount,
+};
