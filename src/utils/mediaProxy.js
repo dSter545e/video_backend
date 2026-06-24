@@ -1,13 +1,40 @@
 const { extractObjectKeyFromUrl } = require("./r2Client");
 
+const isLocalHostname = (hostname) =>
+  hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]";
+
+const shouldForceHttps = () => process.env.MEDIA_FORCE_HTTP !== "true";
+
+const ensureHttpsUrl = (url) => {
+  if (!url || !shouldForceHttps()) return url;
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol === "http:" && !isLocalHostname(parsed.hostname)) {
+      parsed.protocol = "https:";
+      return parsed.toString();
+    }
+  } catch (_error) {
+    // Keep original URL when parsing fails.
+  }
+  return url;
+};
+
+const getRequestProtocol = (req) => {
+  const forwarded = req?.get?.("x-forwarded-proto");
+  if (forwarded) {
+    return String(forwarded).split(",")[0].trim() || "http";
+  }
+  return req?.protocol || "http";
+};
+
 const getMediaBaseUrl = (req) => {
   const configured = process.env.API_PUBLIC_URL;
   if (configured) {
-    return `${configured.replace(/\/$/, "")}/api/media`;
+    return ensureHttpsUrl(`${configured.replace(/\/$/, "")}/api/media`);
   }
   const host = req.get("host");
-  const protocol = req.protocol || "http";
-  return `${protocol}://${host}/api/media`;
+  const protocol = getRequestProtocol(req);
+  return ensureHttpsUrl(`${protocol}://${host}/api/media`);
 };
 
 const buildMediaProxyUrl = (mediaBaseUrl, objectKey) => {
@@ -16,7 +43,27 @@ const buildMediaProxyUrl = (mediaBaseUrl, objectKey) => {
     .split("/")
     .map((segment) => encodeURIComponent(segment))
     .join("/");
-  return `${mediaBaseUrl}/${encodedPath}`;
+  return ensureHttpsUrl(`${mediaBaseUrl}/${encodedPath}`);
+};
+
+const isMediaProxyUrl = (url) => {
+  try {
+    return new URL(url).pathname.includes("/api/media/");
+  } catch (_error) {
+    return false;
+  }
+};
+
+const extractMediaObjectKeyFromProxyUrl = (url) => {
+  try {
+    const pathname = new URL(url).pathname;
+    const prefix = "/api/media/";
+    const index = pathname.indexOf(prefix);
+    if (index === -1) return "";
+    return decodeURIComponent(pathname.slice(index + prefix.length));
+  } catch (_error) {
+    return "";
+  }
 };
 
 const isR2MediaUrl = (url) => {
@@ -33,9 +80,15 @@ const rewriteStreamUrl = (url, mediaBaseUrl) => {
   if (!url || typeof url !== "string") return url;
   const trimmed = url.trim();
   if (!trimmed || trimmed === "about:blank") return trimmed;
-  if (!isR2MediaUrl(trimmed)) return trimmed;
+
+  if (isMediaProxyUrl(trimmed)) {
+    const proxyKey = extractMediaObjectKeyFromProxyUrl(trimmed);
+    if (proxyKey) return buildMediaProxyUrl(mediaBaseUrl, proxyKey);
+  }
+
+  if (!isR2MediaUrl(trimmed)) return ensureHttpsUrl(trimmed);
   const objectKey = extractObjectKeyFromUrl(trimmed);
-  if (!objectKey) return trimmed;
+  if (!objectKey) return ensureHttpsUrl(trimmed);
   return buildMediaProxyUrl(mediaBaseUrl, objectKey);
 };
 
@@ -117,6 +170,7 @@ module.exports = {
   buildMediaProxyUrl,
   isR2MediaUrl,
   rewriteStreamUrl,
+  ensureHttpsUrl,
   withMediaProxyUrls,
   withMediaProxyUrlsList,
   rewriteM3u8Content,

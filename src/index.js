@@ -25,6 +25,8 @@ const { startHealthMonitorScheduler } = require("./services/healthMonitorService
 const app = express();
 const PORT = process.env.PORT || 5000;
 
+app.set("trust proxy", 1);
+
 app.use(createCorsMiddleware());
 app.use(express.json());
 
