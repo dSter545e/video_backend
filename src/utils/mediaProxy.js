@@ -33,13 +33,29 @@ const getMediaBaseUrl = (req) => {
     return ensureHttpsUrl(`${configured.replace(/\/$/, "")}/api/media`);
   }
 
+  const siteUrl = process.env.USER_SITE_URL || process.env.FRONTEND_URL;
+  const requestHost = String(req.get("host") || "");
+  const requestHostname = requestHost.split(":")[0].toLowerCase();
+
+  if (siteUrl) {
+    try {
+      const site = new URL(siteUrl);
+      const siteHostname = site.hostname.toLowerCase();
+      if (siteHostname === requestHostname && !/^api\./i.test(siteHostname)) {
+        const derived = `${site.protocol}//api.${siteHostname.replace(/^www\./i, "")}`;
+        return ensureHttpsUrl(`${derived}/api/media`);
+      }
+    } catch (_error) {
+      // Fall through to request host.
+    }
+  }
+
   if (process.env.NODE_ENV === "production") {
     console.warn(
-      "[mediaProxy] API_PUBLIC_URL is not set. Media URLs use the request Host header and may point at the user frontend instead of the API server. Set API_PUBLIC_URL to your public backend origin (same as NEXT_PUBLIC_API_URL)."
+      "[mediaProxy] API_PUBLIC_URL is not set. Set it to your public backend origin (same as NEXT_PUBLIC_MEDIA_API_URL / api subdomain)."
     );
   }
 
-  const requestHost = req.get("host");
   const protocol = getRequestProtocol(req);
   return ensureHttpsUrl(`${protocol}://${requestHost}/api/media`);
 };
