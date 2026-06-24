@@ -28,13 +28,20 @@ const getRequestProtocol = (req) => {
 };
 
 const getMediaBaseUrl = (req) => {
-  const configured = process.env.API_PUBLIC_URL;
+  const configured = process.env.API_PUBLIC_URL?.trim();
   if (configured) {
     return ensureHttpsUrl(`${configured.replace(/\/$/, "")}/api/media`);
   }
-  const host = req.get("host");
+
+  if (process.env.NODE_ENV === "production") {
+    console.warn(
+      "[mediaProxy] API_PUBLIC_URL is not set. Media URLs use the request Host header and may point at the user frontend instead of the API server. Set API_PUBLIC_URL to your public backend origin (same as NEXT_PUBLIC_API_URL)."
+    );
+  }
+
+  const requestHost = req.get("host");
   const protocol = getRequestProtocol(req);
-  return ensureHttpsUrl(`${protocol}://${host}/api/media`);
+  return ensureHttpsUrl(`${protocol}://${requestHost}/api/media`);
 };
 
 const buildMediaProxyUrl = (mediaBaseUrl, objectKey) => {

@@ -131,6 +131,11 @@ const listenOnFixedPort = async (port) =>
 const start = async () => {
   try {
     registerProcessErrorHandlers();
+    if (process.env.NODE_ENV === "production" && !process.env.API_PUBLIC_URL?.trim()) {
+      console.warn(
+        "[startup] API_PUBLIC_URL is not set. Video/media URLs returned by the API may use the wrong host when requests are proxied through the user site. Set API_PUBLIC_URL to your public backend origin."
+      );
+    }
     await connectDB();
     const preferredPort = Number(PORT);
     const { server, port } = await listenOnFixedPort(preferredPort);
