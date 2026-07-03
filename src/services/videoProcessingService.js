@@ -18,9 +18,23 @@ const BANDWIDTH_BY_HEIGHT = {
   144: 250000,
   240: 450000,
   360: 800000,
-  480: 1400000,
-  720: 2800000,
-  1080: 5000000,
+  480: 1600000,
+  720: 3200000,
+  1080: 8500000,
+};
+
+/** Higher tiers get lower CRF + better preset so 720p/1080p stay closer to the source. */
+const getVariantEncodeSettings = (targetHeight) => {
+  if (targetHeight >= 1080) {
+    return { crf: "18", preset: "medium", maxrate: "8000k", bufsize: "16000k" };
+  }
+  if (targetHeight >= 720) {
+    return { crf: "20", preset: "fast", maxrate: "4500k", bufsize: "9000k" };
+  }
+  if (targetHeight >= 480) {
+    return { crf: "22", preset: "fast", maxrate: "2500k", bufsize: "5000k" };
+  }
+  return { crf: "23", preset: "veryfast", maxrate: null, bufsize: null };
 };
 
 const formatFfmpegError = (stderr, fallback) => {
@@ -150,17 +164,25 @@ const transcodeVariantToHls = async ({
     args.push("-vf", `scale=-2:${targetHeight}`, "-map", "0:v:0", "-map", "0:a?");
   }
 
+  const encode = getVariantEncodeSettings(targetHeight);
   args.push(
     "-c:v",
     "libx264",
     "-preset",
-    "veryfast",
+    encode.preset,
     "-crf",
-    "23",
+    encode.crf,
+    "-pix_fmt",
+    "yuv420p"
+  );
+  if (encode.maxrate && encode.bufsize) {
+    args.push("-maxrate", encode.maxrate, "-bufsize", encode.bufsize);
+  }
+  args.push(
     "-c:a",
     "aac",
     "-b:a",
-    "128k",
+    targetHeight >= 720 ? "192k" : "128k",
     "-hls_time",
     "10",
     "-hls_playlist_type",
