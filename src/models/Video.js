@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const { seoSchemaDefinition } = require("./seoSchema");
 
 const videoSchema = new mongoose.Schema(
   {
@@ -62,6 +63,7 @@ const videoSchema = new mongoose.Schema(
     },
     healthCheckedAt: { type: Date, default: null },
     healthMessage: { type: String, default: "" },
+    seo: seoSchemaDefinition,
   },
   { timestamps: true }
 );

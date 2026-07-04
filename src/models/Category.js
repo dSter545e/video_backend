@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const { seoSchemaDefinition } = require("./seoSchema");
 
 const categorySchema = new mongoose.Schema(
   {
@@ -7,6 +8,7 @@ const categorySchema = new mongoose.Schema(
     imageUrl: { type: String, default: "" },
     imageKey: { type: String, default: "" },
     featured: { type: Boolean, default: false },
+    seo: seoSchemaDefinition,
   },
   { timestamps: true }
 );

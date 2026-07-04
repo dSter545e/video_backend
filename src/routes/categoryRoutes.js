@@ -9,10 +9,14 @@ const { adminAuth } = require("../middleware/authMiddleware");
 const { uploadImageFile } = require("../middleware/uploadMiddleware");
 
 const router = express.Router();
+const categoryUploadFields = uploadImageFile.fields([
+  { name: "image", maxCount: 1 },
+  { name: "ogImageFile", maxCount: 1 },
+]);
 
 router.get("/", getCategories);
-router.post("/", adminAuth, uploadImageFile.single("image"), createCategory);
-router.put("/:id", adminAuth, uploadImageFile.single("image"), updateCategory);
+router.post("/", adminAuth, categoryUploadFields, createCategory);
+router.put("/:id", adminAuth, categoryUploadFields, updateCategory);
 router.delete("/:id", adminAuth, deleteCategory);
 
 module.exports = router;

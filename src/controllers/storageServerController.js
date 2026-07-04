@@ -1,6 +1,7 @@
 const StorageServer = require("../models/StorageServer");
 const mongoose = require("mongoose");
 const { headBucketInR2, formatR2Error } = require("../utils/r2Client");
+const { refreshMediaCdnCache } = require("../utils/mediaCdnResolver");
 
 const trimCredentials = (body = {}) => ({
   name: typeof body.name === "string" ? body.name.trim() : body.name,
@@ -57,6 +58,7 @@ const createStorageServer = async (req, res) => {
 
   const safeServer = server.toObject();
   safeServer.secretAccessKey = "********";
+  await refreshMediaCdnCache();
   return res.status(201).json(safeServer);
 };
 
@@ -86,6 +88,7 @@ const updateStorageServer = async (req, res) => {
 
   const safeServer = server.toObject();
   safeServer.secretAccessKey = "********";
+  await refreshMediaCdnCache();
   return res.json(safeServer);
 };
 

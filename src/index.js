@@ -19,6 +19,7 @@ const storageServerRoutes = require("./routes/storageServerRoutes");
 const healthMonitorRoutes = require("./routes/healthMonitorRoutes");
 const adRoutes = require("./routes/adRoutes");
 const settingsRoutes = require("./routes/settingsRoutes");
+const pageRoutes = require("./routes/pageRoutes");
 const { startAutoBackupScheduler } = require("./services/backupService");
 const { startHealthMonitorScheduler } = require("./services/healthMonitorService");
 
@@ -36,6 +37,14 @@ app.get("/", (_req, res) => {
 
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true });
+});
+
+app.get("/api/public-config", (_req, res) => {
+  const { getMediaCdnBaseUrl, usesMediaCdn } = require("./utils/mediaCdnResolver");
+  res.json({
+    mediaCdnUrl: getMediaCdnBaseUrl() || null,
+    usesMediaCdn: usesMediaCdn(),
+  });
 });
 
 app.get("/api/health/upload", (req, res) => {
@@ -72,6 +81,7 @@ app.use("/api/storage-servers", storageServerRoutes);
 app.use("/api/health-monitor", healthMonitorRoutes);
 app.use("/api/ads", adRoutes);
 app.use("/api/settings", settingsRoutes);
+app.use("/api/pages", pageRoutes);
 
 app.use((req, res) => {
   res.status(404).json({ error: `Route not found: ${req.method} ${req.originalUrl}` });
@@ -137,6 +147,16 @@ const start = async () => {
       );
     }
     await connectDB();
+    const { ensureSystemPages } = require("./services/systemPagesService");
+    await ensureSystemPages();
+    const { refreshMediaCdnCache, getMediaCdnBaseUrl } = require("./utils/mediaCdnResolver");
+    await refreshMediaCdnCache();
+    const mediaCdn = getMediaCdnBaseUrl();
+    if (mediaCdn) {
+      console.log(`[media] Direct delivery via ${mediaCdn} (Cloudflare/R2 — not /api/media)`);
+    } else {
+      console.log("[media] Using /api/media proxy. Set MEDIA_CDN_URL or Admin → Storage → Public Base URL.");
+    }
     const preferredPort = Number(PORT);
     const { server, port } = await listenOnFixedPort(preferredPort);
     startAutoBackupScheduler();

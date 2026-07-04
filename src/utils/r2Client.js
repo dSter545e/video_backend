@@ -379,31 +379,44 @@ const extractStorageKeyFromReference = (value) => {
 
 const { parseOriginsFromEnv } = require("../config/cors");
 
-const getDefaultCorsOrigins = () => parseOriginsFromEnv();
+const getDefaultCorsOrigins = () => {
+  const origins = new Set(parseOriginsFromEnv());
+  for (const key of ["USER_SITE_URL", "FRONTEND_URL", "ADMIN_SITE_URL"]) {
+    const value = process.env[key]?.trim().replace(/\/+$/, "");
+    if (value) origins.add(value);
+  }
+  return Array.from(origins);
+};
 
-const configureR2Cors = async (allowedOrigins = getDefaultCorsOrigins(), serverConfig = null) => {
+const configureR2Cors = async (_allowedOrigins = getDefaultCorsOrigins(), serverConfig = null) => {
   const client = await createR2Client(serverConfig);
   const { bucket } = await getR2Config(serverConfig);
-  const origins = Array.from(new Set(allowedOrigins.filter(Boolean)));
 
+  // Public media (HLS .m3u8 / .ts) must allow browser XHR from any site origin.
   await client.send(
     new PutBucketCorsCommand({
       Bucket: bucket,
       CORSConfiguration: {
         CORSRules: [
           {
-            AllowedOrigins: origins,
+            AllowedOrigins: ["*"],
             AllowedMethods: ["GET", "HEAD"],
             AllowedHeaders: ["*"],
-            ExposeHeaders: ["ETag", "Content-Length", "Content-Type"],
-            MaxAgeSeconds: 3600,
+            ExposeHeaders: [
+              "ETag",
+              "Content-Length",
+              "Content-Type",
+              "Content-Range",
+              "Accept-Ranges",
+            ],
+            MaxAgeSeconds: 86400,
           },
         ],
       },
     })
   );
 
-  return { bucket, origins };
+  return { bucket, origins: ["*"] };
 };
 
 const configureAllR2Cors = async (allowedOrigins = getDefaultCorsOrigins()) => {

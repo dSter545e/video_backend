@@ -1,4 +1,5 @@
 const { extractObjectKeyFromUrl } = require("./r2Client");
+const { getMediaCdnBaseUrl, usesMediaCdn } = require("./mediaCdnResolver");
 
 const isLocalHostname = (hostname) =>
   hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]";
@@ -28,6 +29,9 @@ const getRequestProtocol = (req) => {
 };
 
 const getMediaBaseUrl = (req) => {
+  const cdnBase = getMediaCdnBaseUrl();
+  if (cdnBase) return cdnBase;
+
   const configured = process.env.API_PUBLIC_URL?.trim();
   if (configured) {
     return ensureHttpsUrl(`${configured.replace(/\/$/, "")}/api/media`);
@@ -60,14 +64,17 @@ const getMediaBaseUrl = (req) => {
   return ensureHttpsUrl(`${protocol}://${requestHost}/api/media`);
 };
 
-const buildMediaProxyUrl = (mediaBaseUrl, objectKey) => {
+const buildMediaPublicUrl = (mediaBaseUrl, objectKey) => {
   const encodedPath = String(objectKey || "")
     .replace(/^\/+/, "")
     .split("/")
     .map((segment) => encodeURIComponent(segment))
     .join("/");
-  return ensureHttpsUrl(`${mediaBaseUrl}/${encodedPath}`);
+  return ensureHttpsUrl(`${mediaBaseUrl.replace(/\/$/, "")}/${encodedPath}`);
 };
+
+/** @deprecated use buildMediaPublicUrl */
+const buildMediaProxyUrl = (mediaBaseUrl, objectKey) => buildMediaPublicUrl(mediaBaseUrl, objectKey);
 
 const isMediaProxyUrl = (url) => {
   try {
@@ -106,13 +113,16 @@ const rewriteStreamUrl = (url, mediaBaseUrl) => {
 
   if (isMediaProxyUrl(trimmed)) {
     const proxyKey = extractMediaObjectKeyFromProxyUrl(trimmed);
-    if (proxyKey) return buildMediaProxyUrl(mediaBaseUrl, proxyKey);
+    if (proxyKey) return buildMediaPublicUrl(mediaBaseUrl, proxyKey);
   }
 
-  if (!isR2MediaUrl(trimmed)) return ensureHttpsUrl(trimmed);
-  const objectKey = extractObjectKeyFromUrl(trimmed);
-  if (!objectKey) return ensureHttpsUrl(trimmed);
-  return buildMediaProxyUrl(mediaBaseUrl, objectKey);
+  if (isR2MediaUrl(trimmed)) {
+    const objectKey = extractObjectKeyFromUrl(trimmed);
+    if (!objectKey) return ensureHttpsUrl(trimmed);
+    return buildMediaPublicUrl(mediaBaseUrl, objectKey);
+  }
+
+  return ensureHttpsUrl(trimmed);
 };
 
 const toPlainVideo = (video) => (video && typeof video.toObject === "function" ? video.toObject() : video);
@@ -128,6 +138,10 @@ const withMediaProxyUrls = (video, req) => {
 
   if (nextVideo.previewUrl) {
     nextVideo.previewUrl = rewriteStreamUrl(nextVideo.previewUrl, mediaBaseUrl);
+  }
+
+  if (nextVideo.thumbnail) {
+    nextVideo.thumbnail = rewriteStreamUrl(nextVideo.thumbnail, mediaBaseUrl);
   }
 
   if (Array.isArray(nextVideo.qualityVariants)) {
@@ -175,7 +189,7 @@ const rewriteM3u8Content = (content, playlistKey, mediaBaseUrl) => {
       if (/^https?:\/\//i.test(resolvedKey)) {
         return rewriteStreamUrl(resolvedKey, mediaBaseUrl);
       }
-      return buildMediaProxyUrl(mediaBaseUrl, resolvedKey);
+      return buildMediaPublicUrl(mediaBaseUrl, resolvedKey);
     })
     .join("\n");
 };
@@ -190,6 +204,9 @@ const getContentTypeForKey = (objectKey) => {
 
 module.exports = {
   getMediaBaseUrl,
+  getMediaCdnBaseUrl,
+  usesMediaCdn,
+  buildMediaPublicUrl,
   buildMediaProxyUrl,
   isR2MediaUrl,
   rewriteStreamUrl,

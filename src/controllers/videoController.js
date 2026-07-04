@@ -19,6 +19,7 @@ const {
   cancelVideoProcessingJob,
 } = require("../workers/videoProcessingWorker");
 const { buildUniqueSlug } = require("../utils/slug");
+const { buildSeoDocument, buildSeoUpdateFields, applyUploadedOgImage } = require("../utils/seo");
 const { withMediaProxyUrls, withMediaProxyUrlsList } = require("../utils/mediaProxy");
 
 const FINAL_VIDEO_STATUSES = ["public", "private", "draft", "active", "inactive"];
@@ -262,6 +263,17 @@ const uploadThumbnailIfPresent = async (file, serverConfig = null) => {
     serverConfig,
   });
   return uploaded;
+};
+
+const uploadOgImageIfPresent = async (file, serverConfig = null) => {
+  if (!file) return null;
+  const objectKey = `images/seo/${Date.now()}-${file.filename}`;
+  return uploadFileToR2({
+    localFilePath: file.path,
+    objectKey,
+    contentType: file.mimetype || "image/jpeg",
+    serverConfig,
+  });
 };
 
 const EVENT_WEIGHTS = {
@@ -554,6 +566,7 @@ const createVideo = async (req, res) => {
     finalStatus: FINAL_VIDEO_STATUSES.includes(status) ? normalizeFinalStatus(status) : "public",
     ...(category ? { category: category._id } : {}),
     tags: tagIds,
+    seo: buildSeoDocument(req.body),
   });
 
   await video.populate("category", "name imageUrl");
@@ -566,6 +579,7 @@ const createProcessedVideo = async (req, res) => {
   const { title, description, thumbnail, categoryId, status, slug, tags = [] } = req.body;
   const uploadedVideoFile = req.files?.video?.[0];
   const uploadedThumbnailFile = req.files?.thumbnailImage?.[0];
+  const uploadedOgImageFile = req.files?.ogImageFile?.[0];
 
   if (!title || !uploadedVideoFile) {
     return res.status(400).json({ error: "title and video file are required" });
@@ -592,6 +606,12 @@ const createProcessedVideo = async (req, res) => {
 
     const uploadedThumb = await uploadThumbnailIfPresent(uploadedThumbnailFile, serverConfig);
     uploadedThumbKey = uploadedThumb?.key || "";
+    const uploadedOg = await uploadOgImageIfPresent(uploadedOgImageFile, serverConfig);
+    const seo = buildSeoDocument(req.body);
+    if (uploadedOg?.url) {
+      seo.ogImage = uploadedOg.url;
+      seo.ogImageKey = uploadedOg.key || "";
+    }
 
     const tagIds = await resolveTags(resolveIncomingTags(req.body));
     const videoSlug = await buildUniqueSlug({
@@ -615,6 +635,7 @@ const createProcessedVideo = async (req, res) => {
       ...(category ? { category: category._id } : {}),
       tags: tagIds,
       storageServer: defaultServer._id,
+      seo,
     });
 
     await video.populate("category", "name imageUrl");
@@ -679,6 +700,7 @@ const updateVideo = async (req, res) => {
   const { id } = req.params;
   const { title, description, thumbnail, videoUrl, categoryId, status, slug, tags } = req.body;
   const uploadedThumbnailFile = req.files?.thumbnailImage?.[0];
+  const uploadedOgImageFile = req.files?.ogImageFile?.[0];
 
   if (categoryId !== undefined && categoryId && String(categoryId).trim()) {
     const category = await Category.findOne(resolveCategoryFilter(categoryId)).select("_id");
@@ -725,6 +747,15 @@ const updateVideo = async (req, res) => {
       }
     }
 
+    const uploadedOg = await uploadOgImageIfPresent(uploadedOgImageFile, serverConfig);
+    const existingOgKey = existing.seo?.ogImageKey || extractObjectKeyFromUrl(existing.seo?.ogImage);
+    if (uploadedOg?.key && existingOgKey) {
+      try {
+        await deleteFileFromR2(existingOgKey, serverConfig);
+      } catch (error) {
+      }
+    }
+
     const updateDoc = {
       ...(title !== undefined ? { title } : {}),
       ...(nextSlug ? { slug: nextSlug } : {}),
@@ -737,7 +768,9 @@ const updateVideo = async (req, res) => {
       ...(status !== undefined && FINAL_VIDEO_STATUSES.includes(status)
         ? { processingStatus: normalizeFinalStatus(status), finalStatus: normalizeFinalStatus(status) }
         : {}),
+      ...buildSeoUpdateFields(req.body),
     };
+    applyUploadedOgImage(updateDoc, uploadedOg, existing.seo);
     if (tags !== undefined) {
       const tagIds = await resolveTags(resolveIncomingTags(req.body));
       updateDoc.tags = tagIds;

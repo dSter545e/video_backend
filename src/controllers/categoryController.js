@@ -4,6 +4,7 @@ const mongoose = require("mongoose");
 const Video = require("../models/Video");
 const { uploadFileToR2, deleteFileFromR2, extractObjectKeyFromUrl } = require("../utils/r2Client");
 const { buildUniqueSlug } = require("../utils/slug");
+const { buildSeoDocument, buildSeoUpdateFields, applyUploadedOgImage } = require("../utils/seo");
 
 const FEATURED_CATEGORY_LIMIT = 6;
 
@@ -28,6 +29,16 @@ const uploadCategoryImageIfPresent = async (file) => {
   return uploaded;
 };
 
+const uploadCategoryOgImageIfPresent = async (file) => {
+  if (!file) return null;
+  const objectKey = `images/seo/${Date.now()}-${file.filename}`;
+  return uploadFileToR2({
+    localFilePath: file.path,
+    objectKey,
+    contentType: file.mimetype || "image/jpeg",
+  });
+};
+
 const getCategories = async (_req, res) => {
   const categories = await Category.find().sort({ createdAt: -1 });
   return res.json(categories);
@@ -36,7 +47,8 @@ const getCategories = async (_req, res) => {
 const createCategory = async (req, res) => {
   const { name, imageUrl, slug } = req.body;
   const featured = parseFeaturedFlag(req.body.featured);
-  const imageFile = req.file;
+  const imageFile = req.file || req.files?.image?.[0];
+  const ogImageFile = req.files?.ogImageFile?.[0];
   if (!name) {
     return res.status(400).json({ error: "name is required" });
   }
@@ -50,6 +62,12 @@ const createCategory = async (req, res) => {
     }
 
     const uploadedImage = await uploadCategoryImageIfPresent(imageFile);
+    const uploadedOg = await uploadCategoryOgImageIfPresent(ogImageFile);
+    const seo = buildSeoDocument(req.body);
+    if (uploadedOg?.url) {
+      seo.ogImage = uploadedOg.url;
+      seo.ogImageKey = uploadedOg.key || "";
+    }
     const categorySlug = await buildUniqueSlug({
       source: name,
       providedSlug: slug,
@@ -61,6 +79,7 @@ const createCategory = async (req, res) => {
       imageUrl: uploadedImage?.url || imageUrl || "",
       imageKey: uploadedImage?.key || "",
       featured: Boolean(featured),
+      seo,
     });
     return res.status(201).json(category);
   } catch (error) {
@@ -69,6 +88,9 @@ const createCategory = async (req, res) => {
     if (imageFile?.path) {
       fs.rmSync(imageFile.path, { force: true });
     }
+    if (ogImageFile?.path) {
+      fs.rmSync(ogImageFile.path, { force: true });
+    }
   }
 };
 
@@ -76,7 +98,8 @@ const updateCategory = async (req, res) => {
   const { id } = req.params;
   const { name, imageUrl, slug } = req.body;
   const featured = parseFeaturedFlag(req.body.featured);
-  const imageFile = req.file;
+  const imageFile = req.file || req.files?.image?.[0];
+  const ogImageFile = req.files?.ogImageFile?.[0];
 
   if (!mongoose.Types.ObjectId.isValid(id)) {
     return res.status(400).json({ error: "Invalid category id" });
@@ -97,6 +120,7 @@ const updateCategory = async (req, res) => {
     }
 
     const uploadedImage = await uploadCategoryImageIfPresent(imageFile);
+    const uploadedOg = await uploadCategoryOgImageIfPresent(ogImageFile);
     const existingImageKey = existing.imageKey || extractObjectKeyFromUrl(existing.imageUrl);
     if (uploadedImage?.key && existingImageKey) {
       try {
@@ -116,17 +140,29 @@ const updateCategory = async (req, res) => {
         })
       : existing.slug;
 
+    const existingOgKey = existing.seo?.ogImageKey || extractObjectKeyFromUrl(existing.seo?.ogImage);
+    if (uploadedOg?.key && existingOgKey) {
+      try {
+        await deleteFileFromR2(existingOgKey);
+      } catch (error) {
+      }
+    }
+
+    const updateSet = {
+      ...(name ? { name } : {}),
+      ...(nextSlug ? { slug: nextSlug } : {}),
+      ...(imageUrl !== undefined ? { imageUrl } : {}),
+      ...(uploadedImage?.url ? { imageUrl: uploadedImage.url } : {}),
+      ...(uploadedImage?.key ? { imageKey: uploadedImage.key } : {}),
+      ...(featured !== undefined ? { featured } : {}),
+      ...buildSeoUpdateFields(req.body),
+    };
+    applyUploadedOgImage(updateSet, uploadedOg, existing.seo);
+
     const category = await Category.findByIdAndUpdate(
       id,
       {
-        $set: {
-          ...(name ? { name } : {}),
-          ...(nextSlug ? { slug: nextSlug } : {}),
-          ...(imageUrl !== undefined ? { imageUrl } : {}),
-          ...(uploadedImage?.url ? { imageUrl: uploadedImage.url } : {}),
-          ...(uploadedImage?.key ? { imageKey: uploadedImage.key } : {}),
-          ...(featured !== undefined ? { featured } : {}),
-        },
+        $set: updateSet,
       },
       { returnDocument: "after", runValidators: true }
     );
@@ -138,6 +174,9 @@ const updateCategory = async (req, res) => {
   } finally {
     if (imageFile?.path) {
       fs.rmSync(imageFile.path, { force: true });
+    }
+    if (ogImageFile?.path) {
+      fs.rmSync(ogImageFile.path, { force: true });
     }
   }
 };
